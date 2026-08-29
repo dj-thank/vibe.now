@@ -1,0 +1,22 @@
+# Android
+android/.gradle/
+android/local.properties
+android/**/build/
+*.apk
+*.aab
+
+# iOS / Xcode
+DerivedData/
+*.xcuserstate
+*.xcuserdata/
+*.ipa
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Generated deliverables
+artifacts/
