@@ -1,0 +1,3 @@
+"CFBundleDisplayName" = "SetLog Camera";
+"NSCameraUsageDescription" = "SetLog Camera uses the camera to record video clips while you hold Volume Up.";
+"NSMicrophoneUsageDescription" = "SetLog Camera uses the microphone to include sound in recorded videos.";

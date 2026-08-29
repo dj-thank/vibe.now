@@ -1,0 +1,38 @@
+name: SetLogCamera
+options:
+  bundleIdPrefix: app.setlog
+  deploymentTarget:
+    iOS: "26.0"
+  xcodeVersion: "27.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+targets:
+  SetLogCamera:
+    type: application
+    platform: iOS
+    sources:
+      - path: SetLogCamera
+        excludes:
+          - Resources/Info.plist
+    info:
+      path: SetLogCamera/Resources/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.setlog.camera
+        MARKETING_VERSION: 0.1.0
+        CURRENT_PROJECT_VERSION: 1
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+  SetLogCameraTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - SetLogCameraTests
+    dependencies:
+      - target: SetLogCamera
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.setlog.camera.tests

@@ -1,0 +1,3 @@
+-keep class app.setlog.capture.model.** { *; }
+-keep class androidx.media3.** { *; }
+-dontwarn org.checkerframework.**
