@@ -26,9 +26,13 @@ jobs:
           set -euo pipefail
           FEATURE_BRANCH="feat/vibe-now-controls-overlay-v0.2"
           EXPECTED_HEAD="cc0d5c242f566018d42fcb0b8502f7cc3d1af7e2"
-          PATCH="build-inputs/v0.2/compiler-fixes.patch"
+          SOURCE_PATCH="build-inputs/v0.2/compiler-fixes.patch"
+          PATCH="/tmp/vibenow-compiler-fixes.patch"
 
+          echo "40b1c100061b75b1d3edb334c581223297a1c592f23e9f7716c9a974ecbd3ad3  ${SOURCE_PATCH}" | sha256sum --check --strict
+          cp "${SOURCE_PATCH}" "${PATCH}"
           echo "40b1c100061b75b1d3edb334c581223297a1c592f23e9f7716c9a974ecbd3ad3  ${PATCH}" | sha256sum --check --strict
+
           git fetch origin "refs/heads/${FEATURE_BRANCH}"
           ACTUAL_HEAD="$(git rev-parse FETCH_HEAD)"
           test "$ACTUAL_HEAD" = "$EXPECTED_HEAD"
