@@ -77,12 +77,14 @@ jobs:
             --index \
             --whitespace=error-all \
             --exclude=.github/workflows/archive-source-once.yml \
+            --exclude=.github/workflows/android.yml \
+            --exclude=.github/workflows/ios.yml \
             /tmp/vibenow-v0.2.patch
 
           CHANGED_COUNT="$(git diff --cached --name-only | wc -l | tr -d ' ')"
           echo "Changed files: $CHANGED_COUNT"
           git diff --cached --name-status
-          test "$CHANGED_COUNT" -eq 42
+          test "$CHANGED_COUNT" -eq 40
 
           python3 - <<'PY'
           from pathlib import Path
