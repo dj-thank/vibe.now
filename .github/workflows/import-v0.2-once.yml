@@ -25,8 +25,36 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(find build-inputs/v0.2 -maxdepth 1 -name 'patch.part.*' | wc -l)" -eq 4
-          cat build-inputs/v0.2/patch.part.* | base64 --decode > /tmp/vibenow-v0.2.patch.xz
+
+          declare -A EXPECTED_BLOBS=(
+            [build-inputs/v0.2/patch.part.00]=e9b116e1f9c716d39172f5b8594ba445a9cba491
+            [build-inputs/v0.2/patch.part.01]=d8161ef40339419c8eda0c409c86e31fd568483d
+            [build-inputs/v0.2/patch.part.02.00]=ec86d947244bab27846552ba64c78eb24ba2b88e
+            [build-inputs/v0.2/patch.part.02.01]=cbac86e6449b2a9c213e6060b29af909dcbeca23
+            [build-inputs/v0.2/patch.part.02.02]=48bba42f102a21cd1d3ba02afa76eca01b63387d
+            [build-inputs/v0.2/patch.part.02.03]=c9559c2bdebf0ebb859e3903ee16c4cb5a0bb71d
+            [build-inputs/v0.2/patch.part.02.04]=243688d8f43218b743d5391a9e8b67a92caa0919
+            [build-inputs/v0.2/patch.part.02.05]=caa7502837d9fc5c5597a0c872952bce6e71aab9
+            [build-inputs/v0.2/patch.part.03]=60dbd0c4bcc75fe62a9797407ffe3518ebeee40a
+          )
+
+          for path in "${!EXPECTED_BLOBS[@]}"; do
+            test -f "$path"
+            test "$(git hash-object "$path")" = "${EXPECTED_BLOBS[$path]}"
+          done
+
+          cat \
+            build-inputs/v0.2/patch.part.00 \
+            build-inputs/v0.2/patch.part.01 \
+            build-inputs/v0.2/patch.part.02.00 \
+            build-inputs/v0.2/patch.part.02.01 \
+            build-inputs/v0.2/patch.part.02.02 \
+            build-inputs/v0.2/patch.part.02.03 \
+            build-inputs/v0.2/patch.part.02.04 \
+            build-inputs/v0.2/patch.part.02.05 \
+            build-inputs/v0.2/patch.part.03 \
+            | base64 --decode > /tmp/vibenow-v0.2.patch.xz
+
           echo "eb18478e08f133e5711cf73aab520f900cac53c2a879506bfe789ff73d5a9164  /tmp/vibenow-v0.2.patch.xz" | sha256sum --check --strict
           xz --decompress --stdout /tmp/vibenow-v0.2.patch.xz > /tmp/vibenow-v0.2.patch
 
