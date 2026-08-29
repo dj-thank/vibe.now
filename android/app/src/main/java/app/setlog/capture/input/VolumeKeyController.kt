@@ -4,166 +4,155 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.KeyEvent
-import java.util.ArrayDeque
+import app.setlog.capture.model.InputSettings
+import app.setlog.capture.model.PhysicalVolumeKey
+import app.setlog.capture.model.ShortcutAction
 
+/**
+ * Maps the two hardware volume keys without ever requiring a simultaneous long-press.
+ *
+ * The old Volume Up + Volume Down chord collided with Android's accessibility shortcut. Vibe.now
+ * instead reserves one configurable key for press-and-hold recording and uses multi-press gestures
+ * on the other key. A double action is delayed briefly so a third press can still win.
+ */
 class VolumeKeyController(
+    private val settingsProvider: () -> InputSettings,
     private val clock: () -> Long = SystemClock::elapsedRealtime,
     private val wallClock: () -> Long = System::currentTimeMillis,
     private val handler: Handler = Handler(Looper.getMainLooper()),
     private val callback: Callback,
 ) {
     interface Callback {
-        fun onVolumeUpHoldStarted(pressedAtEpochMs: Long)
-        fun onVolumeUpHoldEnded()
-        fun onFinishChordReached()
-        fun onGalleryTriplePress()
+        fun onRecordHoldStarted(pressedAtEpochMs: Long)
+        fun onRecordHoldEnded()
+        fun onShortcutAction(action: ShortcutAction)
     }
 
-    private var volumeUpDown = false
-    private var volumeDownDown = false
-    private var recordingHoldStarted = false
-    private var chordTriggered = false
-    private var chordCandidate = false
-    private val minusReleaseTimes = ArrayDeque<Long>()
+    private var heldRecordKey: PhysicalVolumeKey? = null
+    private var recordHoldStarted = false
+    private var shortcutKeyDown = false
+    private var shortcutTapCount = 0
+    private var firstShortcutTapAtMs = 0L
 
-    private val delayedStartRecording = Runnable {
-        if (volumeUpDown && !volumeDownDown && !chordTriggered) {
-            recordingHoldStarted = true
-            callback.onVolumeUpHoldStarted(wallClock())
-        }
-    }
-
-    private val delayedFinishChord = Runnable {
-        if (volumeUpDown && volumeDownDown && chordCandidate && !chordTriggered) {
-            chordTriggered = true
-            chordCandidate = false
-            if (recordingHoldStarted) {
-                recordingHoldStarted = false
-                callback.onVolumeUpHoldEnded()
-            }
-            callback.onFinishChordReached()
+    private val resolveShortcut = Runnable {
+        val settings = settingsProvider()
+        val count = shortcutTapCount
+        clearShortcutSequence()
+        when {
+            count >= 3 -> callback.dispatch(settings.triplePressAction)
+            count == 2 -> callback.dispatch(settings.doublePressAction)
         }
     }
 
     fun dispatch(event: KeyEvent): Boolean {
-        return when (event.keyCode) {
-            KeyEvent.KEYCODE_VOLUME_UP -> {
-                handleVolumeUp(event)
+        val key = event.keyCode.toPhysicalVolumeKey() ?: return false
+        val settings = settingsProvider()
+        val isRecordKey = key == settings.recordKey
+        val shortcutsEnabled = settings.doublePressAction != ShortcutAction.NONE ||
+            settings.triplePressAction != ShortcutAction.NONE
+
+        return when {
+            isRecordKey -> {
+                handleRecordKey(key, event)
                 true
             }
-            KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                handleVolumeDown(event)
+            shortcutsEnabled -> {
+                handleShortcutKey(event)
                 true
             }
             else -> false
         }
     }
 
-    private fun handleVolumeUp(event: KeyEvent) {
+    private fun handleRecordKey(key: PhysicalVolumeKey, event: KeyEvent) {
         when (event.action) {
             KeyEvent.ACTION_DOWN -> {
-                if (event.repeatCount > 0 || volumeUpDown) return
-                volumeUpDown = true
-                if (volumeDownDown) {
-                    beginChord()
-                } else {
-                    handler.postDelayed(delayedStartRecording, CHORD_GRACE_MS)
-                }
+                if (event.repeatCount > 0 || heldRecordKey != null) return
+                heldRecordKey = key
+                recordHoldStarted = true
+                callback.onRecordHoldStarted(wallClock())
             }
+
             KeyEvent.ACTION_UP -> {
-                if (!volumeUpDown) return
-                volumeUpDown = false
-                handler.removeCallbacks(delayedStartRecording)
-                cancelChord()
-                if (recordingHoldStarted) {
-                    recordingHoldStarted = false
-                    callback.onVolumeUpHoldEnded()
+                if (heldRecordKey != key) return
+                heldRecordKey = null
+                if (recordHoldStarted) {
+                    recordHoldStarted = false
+                    callback.onRecordHoldEnded()
                 }
-                unlockChordIfReleased()
             }
         }
     }
 
-    private fun handleVolumeDown(event: KeyEvent) {
+    private fun handleShortcutKey(event: KeyEvent) {
         when (event.action) {
             KeyEvent.ACTION_DOWN -> {
-                if (event.repeatCount > 0 || volumeDownDown) return
-                volumeDownDown = true
-                if (volumeUpDown) {
-                    handler.removeCallbacks(delayedStartRecording)
-                    if (recordingHoldStarted) {
-                        recordingHoldStarted = false
-                        callback.onVolumeUpHoldEnded()
-                    }
-                    beginChord()
-                }
+                if (event.repeatCount > 0 || shortcutKeyDown) return
+                shortcutKeyDown = true
             }
+
             KeyEvent.ACTION_UP -> {
-                if (!volumeDownDown) return
-                volumeDownDown = false
-                val wasChord = chordCandidate || chordTriggered
-                cancelChord()
-                if (!wasChord && !chordTriggered) {
-                    registerMinusRelease()
-                } else {
-                    minusReleaseTimes.clear()
-                }
-                if (volumeUpDown && !chordTriggered && !recordingHoldStarted) {
-                    handler.postDelayed(delayedStartRecording, CHORD_GRACE_MS)
-                }
-                unlockChordIfReleased()
+                if (!shortcutKeyDown) return
+                shortcutKeyDown = false
+                registerShortcutTap()
             }
         }
     }
 
-    private fun beginChord() {
-        if (chordTriggered) return
-        chordCandidate = true
-        handler.removeCallbacks(delayedFinishChord)
-        handler.postDelayed(delayedFinishChord, FINISH_HOLD_MS)
-    }
-
-    private fun cancelChord() {
-        chordCandidate = false
-        handler.removeCallbacks(delayedFinishChord)
-    }
-
-    private fun registerMinusRelease() {
+    private fun registerShortcutTap() {
         val now = clock()
-        while (minusReleaseTimes.isNotEmpty() && now - minusReleaseTimes.first() > TRIPLE_WINDOW_MS) {
-            minusReleaseTimes.removeFirst()
+        if (shortcutTapCount == 0 || now - firstShortcutTapAtMs > MULTI_PRESS_WINDOW_MS) {
+            clearShortcutSequence()
+            firstShortcutTapAtMs = now
+            shortcutTapCount = 1
+        } else {
+            shortcutTapCount += 1
         }
-        minusReleaseTimes.addLast(now)
-        if (minusReleaseTimes.size >= 3) {
-            minusReleaseTimes.clear()
-            callback.onGalleryTriplePress()
+
+        handler.removeCallbacks(resolveShortcut)
+        if (shortcutTapCount >= 3) {
+            val action = settingsProvider().triplePressAction
+            clearShortcutSequence()
+            callback.dispatch(action)
+        } else {
+            val elapsed = now - firstShortcutTapAtMs
+            handler.postDelayed(
+                resolveShortcut,
+                (MULTI_PRESS_WINDOW_MS - elapsed).coerceAtLeast(MINIMUM_RESOLUTION_DELAY_MS),
+            )
         }
     }
 
-    private fun unlockChordIfReleased() {
-        if (!volumeUpDown && !volumeDownDown) {
-            chordTriggered = false
-            chordCandidate = false
+    private fun Callback.dispatch(action: ShortcutAction) {
+        if (action != ShortcutAction.NONE) {
+            onShortcutAction(action)
         }
+    }
+
+    private fun clearShortcutSequence() {
+        handler.removeCallbacks(resolveShortcut)
+        shortcutTapCount = 0
+        firstShortcutTapAtMs = 0L
     }
 
     fun reset() {
-        handler.removeCallbacks(delayedStartRecording)
-        handler.removeCallbacks(delayedFinishChord)
-        if (recordingHoldStarted) {
-            recordingHoldStarted = false
-            callback.onVolumeUpHoldEnded()
+        clearShortcutSequence()
+        shortcutKeyDown = false
+        heldRecordKey = null
+        if (recordHoldStarted) {
+            recordHoldStarted = false
+            callback.onRecordHoldEnded()
         }
-        volumeUpDown = false
-        volumeDownDown = false
-        chordTriggered = false
-        chordCandidate = false
-        minusReleaseTimes.clear()
     }
 
     companion object {
-        const val FINISH_HOLD_MS = 2_000L
-        const val CHORD_GRACE_MS = 90L
-        const val TRIPLE_WINDOW_MS = 900L
+        const val MULTI_PRESS_WINDOW_MS = 720L
+        private const val MINIMUM_RESOLUTION_DELAY_MS = 80L
     }
+}
+
+private fun Int.toPhysicalVolumeKey(): PhysicalVolumeKey? = when (this) {
+    KeyEvent.KEYCODE_VOLUME_UP -> PhysicalVolumeKey.UP
+    KeyEvent.KEYCODE_VOLUME_DOWN -> PhysicalVolumeKey.DOWN
+    else -> null
 }

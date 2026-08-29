@@ -40,6 +40,10 @@ enum SetLogHaptics {
         UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.6)
     }
 
+    static func selection() {
+        UISelectionFeedbackGenerator().selectionChanged()
+    }
+
     static func finished() {
         UINotificationFeedbackGenerator().notificationOccurred(.success)
     }

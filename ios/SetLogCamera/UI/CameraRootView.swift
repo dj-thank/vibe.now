@@ -46,11 +46,11 @@ struct CameraRootView: View {
             primaryAction: { event in
                 switch event.phase {
                 case .began:
-                    viewModel.primaryCaptureBegan()
+                    viewModel.captureControlBegan(.primary)
                 case .ended:
-                    viewModel.primaryCaptureEnded()
+                    viewModel.captureControlEnded(.primary)
                 case .cancelled:
-                    viewModel.primaryCaptureEnded(cancelled: true)
+                    viewModel.captureControlEnded(.primary, cancelled: true)
                 @unknown default:
                     break
                 }
@@ -58,11 +58,11 @@ struct CameraRootView: View {
             secondaryAction: { event in
                 switch event.phase {
                 case .began:
-                    viewModel.secondaryCaptureBegan()
+                    viewModel.captureControlBegan(.secondary)
                 case .ended:
-                    viewModel.secondaryCaptureEnded()
+                    viewModel.captureControlEnded(.secondary)
                 case .cancelled:
-                    viewModel.secondaryCaptureEnded(cancelled: true)
+                    viewModel.captureControlEnded(.secondary, cancelled: true)
                 @unknown default:
                     break
                 }

@@ -204,13 +204,13 @@
 		AB8024A74029126F04C24AE4 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {
 			ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon";
 			CODE_SIGN_STYLE = "Automatic";
-			CURRENT_PROJECT_VERSION = "1";
+			CURRENT_PROJECT_VERSION = "2";
 			DEVELOPMENT_ASSET_PATHS = "";
 			ENABLE_PREVIEWS = "YES";
 			GENERATE_INFOPLIST_FILE = "NO";
 			INFOPLIST_FILE = "SetLogCamera/Resources/Info.plist";
 			LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
-			MARKETING_VERSION = "0.1.0";
+			MARKETING_VERSION = "0.2.0";
 			PRODUCT_BUNDLE_IDENTIFIER = "app.setlog.camera";
 			PRODUCT_NAME = "$(TARGET_NAME)";
 			SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -223,13 +223,13 @@
 		8DA8FF2252C4933922094731 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {
 			ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon";
 			CODE_SIGN_STYLE = "Automatic";
-			CURRENT_PROJECT_VERSION = "1";
+			CURRENT_PROJECT_VERSION = "2";
 			DEVELOPMENT_ASSET_PATHS = "";
 			ENABLE_PREVIEWS = "YES";
 			GENERATE_INFOPLIST_FILE = "NO";
 			INFOPLIST_FILE = "SetLogCamera/Resources/Info.plist";
 			LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
-			MARKETING_VERSION = "0.1.0";
+			MARKETING_VERSION = "0.2.0";
 			PRODUCT_BUNDLE_IDENTIFIER = "app.setlog.camera";
 			PRODUCT_NAME = "$(TARGET_NAME)";
 			SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

@@ -45,6 +45,7 @@ fun SetLogApp(
     viewModel: SetLogViewModel,
     onRequestPermissions: () -> Unit,
     onOpenSettings: () -> Unit,
+    onImportVideo: () -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -75,6 +76,7 @@ fun SetLogApp(
                     shareVideo(context, file, session.caption)
                 }
             },
+            onImportVideo = onImportVideo,
         )
     }
 }
@@ -172,7 +174,7 @@ private fun shareVideo(context: Context, file: java.io.File, caption: String) {
         context.getString(R.string.share_text_with_caption, caption)
     }
     val sendIntent = Intent(Intent.ACTION_SEND).apply {
-        type = "video/mp4"
+        type = "video/*"
         putExtra(Intent.EXTRA_STREAM, uri)
         putExtra(Intent.EXTRA_TEXT, message)
         putExtra(Intent.EXTRA_SUBJECT, context.getString(R.string.share_subject))

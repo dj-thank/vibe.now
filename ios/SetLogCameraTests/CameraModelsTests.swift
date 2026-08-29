@@ -19,6 +19,29 @@ final class CameraModelsTests: XCTestCase {
 
     func testFileStemRemovesUnsafeCharacters() {
         XCTAssertEqual(sanitizedFileStem("  My/Set:Log?  "), "My-Set-Log-")
-        XCTAssertEqual(sanitizedFileStem("\n\t"), "SetLog")
+        XCTAssertEqual(sanitizedFileStem("\n\t"), "Vibe.now")
+    }
+
+    func testTimestampOverlaySanitizesInteractiveBounds() {
+        let raw = TimestampOverlaySettings(
+            enabled: true,
+            x: -1,
+            y: 4,
+            scale: 9,
+            style: .monospaced
+        )
+        let safe = raw.sanitized
+        XCTAssertEqual(safe.x, 0.08, accuracy: 0.0001)
+        XCTAssertEqual(safe.y, 0.88, accuracy: 0.0001)
+        XCTAssertEqual(safe.scale, 1.80, accuracy: 0.0001)
+        XCTAssertEqual(safe.style, .monospaced)
+    }
+
+    func testTalkBackSafeDefaultsUseOppositeControlMultipress() {
+        let settings = InputSettings()
+        XCTAssertEqual(settings.recordControl, .secondary)
+        XCTAssertEqual(settings.doublePressAction, .finish)
+        XCTAssertEqual(settings.triplePressAction, .openGallery)
+        XCTAssertEqual(settings.recordControl.opposite, .primary)
     }
 }

@@ -11,8 +11,8 @@ android {
         applicationId = "app.setlog.capture"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -86,6 +86,7 @@ dependencies {
     implementation(libs.androidx.media3.container)
     implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.effect)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

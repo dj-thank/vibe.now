@@ -19,6 +19,7 @@ import androidx.activity.viewModels
 import androidx.core.content.ContextCompat
 import androidx.media3.common.util.UnstableApi
 import app.setlog.capture.input.VolumeKeyController
+import app.setlog.capture.model.ShortcutAction
 import app.setlog.capture.ui.SetLogApp
 import app.setlog.capture.ui.theme.SetLogTheme
 
@@ -32,24 +33,33 @@ class MainActivity : ComponentActivity() {
         publishPermissionState()
     }
 
+    private val videoPickerLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        uri?.let(viewModel::importVideo)
+    }
+
     private val volumeController by lazy {
         VolumeKeyController(
+            settingsProvider = viewModel::inputSettingsSnapshot,
             callback = object : VolumeKeyController.Callback {
-                override fun onVolumeUpHoldStarted(pressedAtEpochMs: Long) {
-                    viewModel.onVolumeUpHoldStarted(pressedAtEpochMs)
+                override fun onRecordHoldStarted(pressedAtEpochMs: Long) {
+                    viewModel.onRecordHoldStarted(pressedAtEpochMs)
                 }
 
-                override fun onVolumeUpHoldEnded() {
-                    viewModel.onVolumeUpHoldEnded()
+                override fun onRecordHoldEnded() {
+                    viewModel.onRecordHoldEnded()
                 }
 
-                override fun onFinishChordReached() {
-                    performFinishHaptic()
-                    viewModel.finishCurrentSession()
-                }
-
-                override fun onGalleryTriplePress() {
-                    viewModel.openGalleryWithoutFinishing()
+                override fun onShortcutAction(action: ShortcutAction) {
+                    when (action) {
+                        ShortcutAction.FINISH -> {
+                            performFinishHaptic()
+                            viewModel.finishCurrentSession()
+                        }
+                        ShortcutAction.OPEN_GALLERY -> viewModel.openGalleryWithoutFinishing()
+                        ShortcutAction.NONE -> Unit
+                    }
                 }
             },
         )
@@ -66,6 +76,7 @@ class MainActivity : ComponentActivity() {
                     viewModel = viewModel,
                     onRequestPermissions = ::requestPermissions,
                     onOpenSettings = ::openAppSettings,
+                    onImportVideo = { videoPickerLauncher.launch(arrayOf("video/*")) },
                 )
             }
         }
@@ -132,9 +143,7 @@ class MainActivity : ComponentActivity() {
 
         val pattern = longArrayOf(0L, 70L, 45L, 140L)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator.vibrate(
-                VibrationEffect.createWaveform(pattern, -1),
-            )
+            vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1))
         } else {
             vibrator.vibrate(pattern, -1)
         }

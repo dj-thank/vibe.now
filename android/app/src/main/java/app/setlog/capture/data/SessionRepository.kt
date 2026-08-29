@@ -1,11 +1,20 @@
 package app.setlog.capture.data
 
 import android.content.Context
+import android.media.MediaMetadataRetriever
+import android.net.Uri
+import android.provider.OpenableColumns
+import android.webkit.MimeTypeMap
 import app.setlog.capture.model.CaptureMarker
+import app.setlog.capture.model.InputSettings
+import app.setlog.capture.model.PhysicalVolumeKey
+import app.setlog.capture.model.ShortcutAction
 import app.setlog.capture.model.PendingSegment
 import app.setlog.capture.model.SegmentRecord
 import app.setlog.capture.model.SessionStatus
 import app.setlog.capture.model.VideoSession
+import app.setlog.capture.model.TimestampOverlaySettings
+import app.setlog.capture.model.TimestampStyle
 import app.setlog.capture.model.defaultTitleTimestamp
 import org.json.JSONArray
 import org.json.JSONObject
@@ -52,11 +61,15 @@ class SessionRepository(context: Context) {
     }
 
     @Synchronized
-    fun getOrCreateDraft(nowEpochMs: Long): VideoSession {
+    fun getOrCreateDraft(
+        nowEpochMs: Long,
+        timestampOverlay: TimestampOverlaySettings = loadTimestampSettings(),
+    ): VideoSession {
         getActiveDraft()?.let { return it }
         val draft = VideoSession.newDraft(
             nowEpochMs = nowEpochMs,
-            title = "SetLog ${defaultTitleTimestamp(nowEpochMs)}",
+            title = "Vibe.now ${defaultTitleTimestamp(nowEpochMs)}",
+            timestampOverlay = timestampOverlay,
         )
         sessionDirectory(draft.id).mkdirs()
         writeManifest(draft)
@@ -72,6 +85,7 @@ class SessionRepository(context: Context) {
     fun createPendingSegment(
         sessionId: String,
         pressedAtEpochMs: Long,
+        createsMarker: Boolean = true,
     ): PendingSegment {
         val session = requireNotNull(readSession(sessionId)) {
             "Session does not exist: $sessionId"
@@ -95,6 +109,7 @@ class SessionRepository(context: Context) {
             startedAtEpochMs = pressedAtEpochMs,
             timelineOffsetMs = session.totalDurationMs,
             ordinal = ordinal,
+            createsMarker = createsMarker,
         )
     }
 
@@ -132,18 +147,22 @@ class SessionRepository(context: Context) {
             durationMs = safeDuration,
             ordinal = pending.ordinal,
         )
-        val marker = CaptureMarker(
-            id = UUID.randomUUID().toString(),
-            pressedAtEpochMs = pending.startedAtEpochMs,
-            timelineOffsetMs = pending.timelineOffsetMs,
-            segmentId = pending.segmentId,
-            ordinal = pending.ordinal,
-        )
+        val marker = if (pending.createsMarker) {
+            CaptureMarker(
+                id = UUID.randomUUID().toString(),
+                pressedAtEpochMs = pending.startedAtEpochMs,
+                timelineOffsetMs = pending.timelineOffsetMs,
+                segmentId = pending.segmentId,
+                ordinal = current.markers.size + 1,
+            )
+        } else {
+            null
+        }
         val updated = current.copy(
             updatedAtEpochMs = System.currentTimeMillis(),
             status = SessionStatus.DRAFT,
             segments = current.segments + segment,
-            markers = current.markers + marker,
+            markers = marker?.let { current.markers + it } ?: current.markers,
             totalDurationMs = current.totalDurationMs + safeDuration,
             errorMessage = null,
         )
@@ -252,6 +271,199 @@ class SessionRepository(context: Context) {
     fun outputFile(sessionId: String, outputFileName: String): File =
         File(sessionDirectory(sessionId), outputFileName)
 
+
+    @Synchronized
+    fun installRebuiltOutput(
+        sessionId: String,
+        temporaryFile: File,
+        outputFileName: String,
+    ): VideoSession {
+        val current = requireNotNull(readSession(sessionId))
+        require(temporaryFile.exists() && temporaryFile.length() > 0L) {
+            "Rebuilt video was empty."
+        }
+        val target = File(sessionDirectory(sessionId), outputFileName)
+        val backup = File(sessionDirectory(sessionId), "$outputFileName.backup")
+        backup.delete()
+        if (target.exists() && !target.renameTo(backup)) {
+            target.inputStream().use { input ->
+                FileOutputStream(backup).use { output -> input.copyTo(output) }
+            }
+            target.delete()
+        }
+        try {
+            if (!temporaryFile.renameTo(target)) {
+                temporaryFile.inputStream().use { input ->
+                    FileOutputStream(target).use { output -> input.copyTo(output) }
+                }
+                temporaryFile.delete()
+            }
+            require(target.exists() && target.length() > 0L) {
+                "Rebuilt video could not be installed."
+            }
+            backup.delete()
+        } catch (error: Throwable) {
+            target.delete()
+            if (backup.exists()) {
+                backup.renameTo(target)
+            }
+            throw error
+        }
+        val updated = current.copy(
+            status = SessionStatus.READY,
+            outputFileName = outputFileName,
+            updatedAtEpochMs = System.currentTimeMillis(),
+            errorMessage = null,
+        )
+        writeManifest(updated)
+        return updated
+    }
+
+    fun loadInputSettings(): InputSettings = InputSettings(
+        recordKey = enumValueOrDefault(
+            preferences.getString(KEY_RECORD_KEY, null),
+            PhysicalVolumeKey.UP,
+        ),
+        doublePressAction = enumValueOrDefault(
+            preferences.getString(KEY_DOUBLE_PRESS_ACTION, null),
+            ShortcutAction.FINISH,
+        ),
+        triplePressAction = enumValueOrDefault(
+            preferences.getString(KEY_TRIPLE_PRESS_ACTION, null),
+            ShortcutAction.OPEN_GALLERY,
+        ),
+    )
+
+    fun saveInputSettings(settings: InputSettings) {
+        preferences.edit()
+            .putString(KEY_RECORD_KEY, settings.recordKey.name)
+            .putString(KEY_DOUBLE_PRESS_ACTION, settings.doublePressAction.name)
+            .putString(KEY_TRIPLE_PRESS_ACTION, settings.triplePressAction.name)
+            .apply()
+    }
+
+    fun loadTimestampSettings(): TimestampOverlaySettings = TimestampOverlaySettings(
+        enabled = preferences.getBoolean(KEY_TIMESTAMP_ENABLED, true),
+        x = preferences.getFloat(KEY_TIMESTAMP_X, 0.50f),
+        y = preferences.getFloat(KEY_TIMESTAMP_Y, 0.14f),
+        scale = preferences.getFloat(KEY_TIMESTAMP_SCALE, 1.0f),
+        style = enumValueOrDefault(
+            preferences.getString(KEY_TIMESTAMP_STYLE, null),
+            TimestampStyle.BOXED,
+        ),
+    ).sanitized()
+
+    fun saveTimestampSettings(settings: TimestampOverlaySettings) {
+        val safe = settings.sanitized()
+        preferences.edit()
+            .putBoolean(KEY_TIMESTAMP_ENABLED, safe.enabled)
+            .putFloat(KEY_TIMESTAMP_X, safe.x)
+            .putFloat(KEY_TIMESTAMP_Y, safe.y)
+            .putFloat(KEY_TIMESTAMP_SCALE, safe.scale)
+            .putString(KEY_TIMESTAMP_STYLE, safe.style.name)
+            .apply()
+    }
+
+    @Synchronized
+    fun updateTimestampOverlay(
+        sessionId: String,
+        settings: TimestampOverlaySettings,
+    ): VideoSession {
+        val current = requireNotNull(readSession(sessionId))
+        val updated = current.copy(
+            timestampOverlay = settings.sanitized(),
+            updatedAtEpochMs = System.currentTimeMillis(),
+        )
+        writeManifest(updated)
+        return updated
+    }
+
+    @Synchronized
+    fun importVideo(sourceUri: Uri): VideoSession {
+        val now = System.currentTimeMillis()
+        val sessionId = UUID.randomUUID().toString()
+        val directory = sessionDirectory(sessionId).apply { mkdirs() }
+        val resolver = appContext.contentResolver
+        val displayName = resolver.query(
+            sourceUri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+        val mimeType = resolver.getType(sourceUri)
+        val fallbackExtension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType)
+            ?.takeIf { it.isNotBlank() }
+            ?: "mp4"
+        val extension = displayName
+            ?.substringAfterLast('.', missingDelimiterValue = "")
+            ?.takeIf { it.matches(Regex("[A-Za-z0-9]{1,8}")) }
+            ?: fallbackExtension
+        val sourceFileName = "segment-0001-import.${extension.lowercase()}"
+        val outputFileName = "vibe-${sessionId}.${extension.lowercase()}"
+        val sourceFile = File(directory, sourceFileName)
+        val outputFile = File(directory, outputFileName)
+
+        try {
+            resolver.openInputStream(sourceUri).use { input ->
+                requireNotNull(input) { "Selected video could not be opened." }
+                FileOutputStream(sourceFile).use { output -> input.copyTo(output) }
+            }
+            require(sourceFile.length() > 0L) { "Selected video was empty." }
+            sourceFile.inputStream().use { input ->
+                FileOutputStream(outputFile).use { output -> input.copyTo(output) }
+            }
+
+            val retriever = MediaMetadataRetriever()
+            val durationMs = try {
+                retriever.setDataSource(appContext, sourceUri)
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    ?.toLongOrNull()
+                    ?.coerceAtLeast(1L)
+                    ?: 1L
+            } finally {
+                runCatching { retriever.release() }
+            }
+            val title = displayName
+                ?.let { name -> name.substringBeforeLast('.', missingDelimiterValue = name) }
+                ?.trim()
+                ?.take(80)
+                ?.ifBlank { null }
+                ?: "Vibe.now ${defaultTitleTimestamp(now)}"
+            val segmentId = UUID.randomUUID().toString()
+            val session = VideoSession(
+                id = sessionId,
+                title = title,
+                caption = "",
+                createdAtEpochMs = now,
+                updatedAtEpochMs = now,
+                status = SessionStatus.READY,
+                segments = listOf(
+                    SegmentRecord(
+                        id = segmentId,
+                        fileName = sourceFileName,
+                        startedAtEpochMs = now,
+                        durationMs = durationMs,
+                        ordinal = 1,
+                    ),
+                ),
+                markers = emptyList(),
+                outputFileName = outputFileName,
+                totalDurationMs = durationMs,
+                errorMessage = null,
+                timestampOverlay = loadTimestampSettings(),
+                imported = true,
+            )
+            writeManifest(session)
+            return session
+        } catch (error: Throwable) {
+            directory.deleteRecursively()
+            throw error
+        }
+    }
+
     fun firstGuideSeen(): Boolean = preferences.getBoolean(KEY_GUIDE_SEEN, false)
 
     fun markFirstGuideSeen() {
@@ -296,7 +508,7 @@ class SessionRepository(context: Context) {
     private fun recoverInterruptedFiles() {
         sessionsDir.mkdirs()
         sessionsDir.walkTopDown()
-            .filter { it.isFile && it.name.endsWith(".partial.mp4") }
+            .filter { it.isFile && it.name.contains(".partial.") }
             .forEach { it.delete() }
 
         sessionsDir.listFiles().orEmpty()
@@ -327,6 +539,14 @@ class SessionRepository(context: Context) {
         private const val PREFS_NAME = "setlog_state"
         private const val KEY_ACTIVE_SESSION_ID = "active_session_id"
         private const val KEY_GUIDE_SEEN = "guide_seen"
+        private const val KEY_RECORD_KEY = "record_key"
+        private const val KEY_DOUBLE_PRESS_ACTION = "double_press_action"
+        private const val KEY_TRIPLE_PRESS_ACTION = "triple_press_action"
+        private const val KEY_TIMESTAMP_ENABLED = "timestamp_enabled"
+        private const val KEY_TIMESTAMP_X = "timestamp_x"
+        private const val KEY_TIMESTAMP_Y = "timestamp_y"
+        private const val KEY_TIMESTAMP_SCALE = "timestamp_scale"
+        private const val KEY_TIMESTAMP_STYLE = "timestamp_style"
     }
 }
 
@@ -341,6 +561,14 @@ private fun videoSessionToJson(session: VideoSession): JSONObject = JSONObject()
     put("outputFileName", session.outputFileName ?: JSONObject.NULL)
     put("totalDurationMs", session.totalDurationMs)
     put("errorMessage", session.errorMessage ?: JSONObject.NULL)
+    put("imported", session.imported)
+    put("timestampOverlay", JSONObject().apply {
+        put("enabled", session.timestampOverlay.enabled)
+        put("x", session.timestampOverlay.x.toDouble())
+        put("y", session.timestampOverlay.y.toDouble())
+        put("scale", session.timestampOverlay.scale.toDouble())
+        put("style", session.timestampOverlay.style.name)
+    })
     put("segments", JSONArray().apply {
         session.segments.forEach { segment ->
             put(JSONObject().apply {
@@ -367,7 +595,7 @@ private fun videoSessionToJson(session: VideoSession): JSONObject = JSONObject()
 
 private fun videoSessionFromJson(json: JSONObject): VideoSession = VideoSession(
     id = json.getString("id"),
-    title = json.optString("title", "SetLog"),
+    title = json.optString("title", "Vibe.now"),
     caption = json.optString("caption", ""),
     createdAtEpochMs = json.getLong("createdAtEpochMs"),
     updatedAtEpochMs = json.getLong("updatedAtEpochMs"),
@@ -395,6 +623,19 @@ private fun videoSessionFromJson(json: JSONObject): VideoSession = VideoSession(
     outputFileName = json.nullableString("outputFileName"),
     totalDurationMs = json.optLong("totalDurationMs", 0L),
     errorMessage = json.nullableString("errorMessage"),
+    timestampOverlay = json.optJSONObject("timestampOverlay")?.let { overlay ->
+        TimestampOverlaySettings(
+            enabled = overlay.optBoolean("enabled", true),
+            x = overlay.optDouble("x", 0.50).toFloat(),
+            y = overlay.optDouble("y", 0.14).toFloat(),
+            scale = overlay.optDouble("scale", 1.0).toFloat(),
+            style = enumValueOrDefault(
+                overlay.optString("style", null),
+                TimestampStyle.BOXED,
+            ),
+        ).sanitized()
+    } ?: TimestampOverlaySettings(),
+    imported = json.optBoolean("imported", false),
 )
 
 private fun <T> JSONArray?.toObjectList(transform: (JSONObject) -> T): List<T> {
@@ -406,3 +647,6 @@ private fun <T> JSONArray?.toObjectList(transform: (JSONObject) -> T): List<T> {
 
 private fun JSONObject.nullableString(key: String): String? =
     if (!has(key) || isNull(key)) null else getString(key)
+
+private inline fun <reified T : Enum<T>> enumValueOrDefault(raw: String?, fallback: T): T =
+    raw?.let { value -> enumValues<T>().firstOrNull { it.name == value } } ?: fallback

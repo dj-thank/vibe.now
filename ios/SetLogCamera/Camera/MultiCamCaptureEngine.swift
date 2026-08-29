@@ -36,7 +36,7 @@ enum SegmentCaptureError: LocalizedError {
     }
 }
 
-/// Records one durable movie clip for each Volume Up hold. A released clip is
+/// Records one durable movie clip for each configured physical-control hold. A released clip is
 /// finalized before it is appended to the persistent session manifest.
 final class SegmentCaptureEngine: NSObject, AVCaptureFileOutputRecordingDelegate {
     let session = AVCaptureSession()
@@ -46,6 +46,7 @@ final class SegmentCaptureEngine: NSObject, AVCaptureFileOutputRecordingDelegate
     var onRecordingStarted: ((URL) -> Void)?
     var onRecordingFinished: ((Result<RecordedSegmentResult, Error>) -> Void)?
     var onCameraPositionChanged: ((AVCaptureDevice.Position) -> Void)?
+    var onCameraSwitchFinished: ((Result<AVCaptureDevice.Position, Error>) -> Void)?
     var onInterrupted: ((String) -> Void)?
 
     private let sessionQueue = DispatchQueue(label: "app.setlog.capture.session", qos: .userInitiated)
@@ -57,6 +58,7 @@ final class SegmentCaptureEngine: NSObject, AVCaptureFileOutputRecordingDelegate
     private var desiredPosition: AVCaptureDevice.Position = .back
     private var activeURL: URL?
     private var recordingStartedUptime: TimeInterval?
+    private var stopRequestedBeforeStart = false
     private var observers: [NSObjectProtocol] = []
 
     override init() {
@@ -127,6 +129,7 @@ final class SegmentCaptureEngine: NSObject, AVCaptureFileOutputRecordingDelegate
             try? FileManager.default.removeItem(at: url)
             self.activeURL = url
             self.recordingStartedUptime = nil
+            self.stopRequestedBeforeStart = false
             if let connection = self.movieOutput.connection(with: .video) {
                 if connection.isVideoStabilizationSupported {
                     connection.preferredVideoStabilizationMode = .auto
@@ -139,21 +142,38 @@ final class SegmentCaptureEngine: NSObject, AVCaptureFileOutputRecordingDelegate
 
     func stopSegment() {
         sessionQueue.async { [weak self] in
-            guard let self, self.movieOutput.isRecording else { return }
-            self.movieOutput.stopRecording()
+            guard let self, self.activeURL != nil else { return }
+            if self.movieOutput.isRecording {
+                self.movieOutput.stopRecording()
+            } else {
+                // AVCaptureMovieFileOutput may need a short interval before didStartRecording fires.
+                // Remember an early release/switch request so the clip is closed immediately on start.
+                self.stopRequestedBeforeStart = true
+            }
         }
     }
 
     func switchCamera() {
         sessionQueue.async { [weak self] in
-            guard let self, self.configured, !self.movieOutput.isRecording else { return }
+            guard let self else { return }
+            guard self.configured, !self.movieOutput.isRecording else {
+                DispatchQueue.main.async {
+                    self.onCameraSwitchFinished?(.failure(SegmentCaptureError.alreadyRecording))
+                }
+                return
+            }
             let next: AVCaptureDevice.Position = self.cameraPosition == .back ? .front : .back
             do {
                 try self.replaceVideoInputLocked(position: next)
                 self.desiredPosition = next
-                DispatchQueue.main.async { self.onCameraPositionChanged?(next) }
+                DispatchQueue.main.async {
+                    self.onCameraPositionChanged?(next)
+                    self.onCameraSwitchFinished?(.success(next))
+                }
             } catch {
-                DispatchQueue.main.async { self.onInterrupted?(error.localizedDescription) }
+                DispatchQueue.main.async {
+                    self.onCameraSwitchFinished?(.failure(error))
+                }
             }
         }
     }
@@ -220,8 +240,13 @@ final class SegmentCaptureEngine: NSObject, AVCaptureFileOutputRecordingDelegate
         from connections: [AVCaptureConnection]
     ) {
         recordingStartedUptime = ProcessInfo.processInfo.systemUptime
+        let shouldStopImmediately = stopRequestedBeforeStart
+        stopRequestedBeforeStart = false
         DispatchQueue.main.async { [weak self] in
             self?.onRecordingStarted?(fileURL)
+        }
+        if shouldStopImmediately {
+            movieOutput.stopRecording()
         }
     }
 
@@ -238,6 +263,7 @@ final class SegmentCaptureEngine: NSObject, AVCaptureFileOutputRecordingDelegate
 
         activeURL = nil
         recordingStartedUptime = nil
+        stopRequestedBeforeStart = false
 
         if let error, !acceptedError {
             try? FileManager.default.removeItem(at: outputFileURL)
@@ -403,6 +429,7 @@ final class SegmentCaptureEngine: NSObject, AVCaptureFileOutputRecordingDelegate
         activeURL.map { try? FileManager.default.removeItem(at: $0) }
         activeURL = nil
         recordingStartedUptime = nil
+        stopRequestedBeforeStart = false
         DispatchQueue.main.async { [weak self] in
             self?.onRecordingFinished?(.failure(error))
         }

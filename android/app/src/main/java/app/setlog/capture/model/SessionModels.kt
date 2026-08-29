@@ -51,12 +51,18 @@ data class VideoSession(
     val outputFileName: String?,
     val totalDurationMs: Long,
     val errorMessage: String?,
+    val timestampOverlay: TimestampOverlaySettings = TimestampOverlaySettings(),
+    val imported: Boolean = false,
 ) {
     val isDraft: Boolean
         get() = status == SessionStatus.DRAFT || status == SessionStatus.FAILED
 
     companion object {
-        fun newDraft(nowEpochMs: Long, title: String): VideoSession = VideoSession(
+        fun newDraft(
+            nowEpochMs: Long,
+            title: String,
+            timestampOverlay: TimestampOverlaySettings,
+        ): VideoSession = VideoSession(
             id = UUID.randomUUID().toString(),
             title = title,
             caption = "",
@@ -68,6 +74,8 @@ data class VideoSession(
             outputFileName = null,
             totalDurationMs = 0L,
             errorMessage = null,
+            timestampOverlay = timestampOverlay.sanitized(),
+            imported = false,
         )
     }
 }
@@ -80,6 +88,7 @@ data class PendingSegment(
     val startedAtEpochMs: Long,
     val timelineOffsetMs: Long,
     val ordinal: Int,
+    val createsMarker: Boolean = true,
 )
 
 data class SetLogUiState(
@@ -96,6 +105,10 @@ data class SetLogUiState(
     val showFirstGuide: Boolean = false,
     val errorMessage: String? = null,
     val usingFrontCamera: Boolean = false,
+    val cameraSwitchInProgress: Boolean = false,
+    val importInProgress: Boolean = false,
+    val inputSettings: InputSettings = InputSettings(),
+    val timestampSettings: TimestampOverlaySettings = TimestampOverlaySettings(),
 ) {
     val displayedDurationMs: Long
         get() = (activeSession?.totalDurationMs ?: 0L) + currentSegmentDurationMs

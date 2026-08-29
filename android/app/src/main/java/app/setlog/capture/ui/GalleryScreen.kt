@@ -97,6 +97,7 @@ fun GalleryScreen(
     state: SetLogUiState,
     viewModel: SetLogViewModel,
     onShare: (VideoSession) -> Unit,
+    onImportVideo: () -> Unit,
 ) {
     val unfinished = state.sessions.firstOrNull {
         it.status == SessionStatus.DRAFT ||
@@ -110,7 +111,11 @@ fun GalleryScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background),
     ) {
-        GalleryTopBar(onBack = viewModel::openCamera)
+        GalleryTopBar(
+            onBack = viewModel::openCamera,
+            onImport = onImportVideo,
+            importInProgress = state.importInProgress,
+        )
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
@@ -170,8 +175,8 @@ fun GalleryScreen(
                 viewModel.resumeSession(selected.id)
             },
             onRetry = { viewModel.retryExport(selected.id) },
-            onSave = { title, caption ->
-                viewModel.updateSessionDetails(selected.id, title, caption)
+            onSave = { title, caption, timestamp ->
+                viewModel.updateSessionAndRebuild(selected.id, title, caption, timestamp)
                 viewModel.selectSession(null)
             },
             onShare = { onShare(selected) },
@@ -197,7 +202,11 @@ fun GalleryScreen(
 }
 
 @Composable
-private fun GalleryTopBar(onBack: () -> Unit) {
+private fun GalleryTopBar(
+    onBack: () -> Unit,
+    onImport: () -> Unit,
+    importInProgress: Boolean,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -222,17 +231,25 @@ private fun GalleryTopBar(onBack: () -> Unit) {
             fontWeight = FontWeight.Bold,
         )
         FilledTonalButton(
-            onClick = onBack,
+            onClick = onImport,
+            enabled = !importInProgress,
             shape = RoundedCornerShape(16.dp),
-            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp),
+            contentPadding = PaddingValues(horizontal = 13.dp, vertical = 9.dp),
         ) {
-            Icon(
-                imageVector = Icons.Rounded.CameraAlt,
-                contentDescription = null,
-                modifier = Modifier.size(18.dp),
-            )
+            if (importInProgress) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Rounded.FolderOpen,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
             Text(
-                text = stringResource(R.string.camera),
+                text = stringResource(R.string.import_video),
                 modifier = Modifier.padding(start = 7.dp),
             )
         }
@@ -432,6 +449,15 @@ private fun FinishedCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
+                if (session.imported) {
+                    Text(
+                        text = stringResource(R.string.imported_video),
+                        modifier = Modifier.padding(top = 4.dp),
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
                 Row(
                     modifier = Modifier.padding(top = 10.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -581,7 +607,7 @@ private fun SessionDetailDialog(
     onDismiss: () -> Unit,
     onContinue: () -> Unit,
     onRetry: () -> Unit,
-    onSave: (String, String) -> Unit,
+    onSave: (String, String, app.setlog.capture.model.TimestampOverlaySettings) -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -590,6 +616,9 @@ private fun SessionDetailDialog(
     }
     var caption by remember(session.id, session.updatedAtEpochMs) {
         mutableStateOf(session.caption)
+    }
+    var timestamp by remember(session.id, session.updatedAtEpochMs) {
+        mutableStateOf(session.timestampOverlay)
     }
     var showDeleteConfirmation by remember { mutableStateOf(false) }
 
@@ -678,6 +707,12 @@ private fun SessionDetailDialog(
                     shape = RoundedCornerShape(16.dp),
                 )
 
+                TimestampSettingsEditor(
+                    settings = timestamp,
+                    onSettingsChange = { timestamp = it },
+                    modifier = Modifier.padding(top = 22.dp),
+                )
+
                 Spacer(Modifier.height(18.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     InfoBlock(
@@ -756,7 +791,7 @@ private fun SessionDetailDialog(
                 Spacer(Modifier.height(24.dp))
 
                 Button(
-                    onClick = { onSave(title, caption) },
+                    onClick = { onSave(title, caption, timestamp) },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(17.dp),
                     contentPadding = PaddingValues(vertical = 14.dp),
@@ -767,7 +802,11 @@ private fun SessionDetailDialog(
                         modifier = Modifier.size(19.dp),
                     )
                     Text(
-                        text = stringResource(R.string.save),
+                        text = if (session.status == SessionStatus.READY) {
+                            stringResource(R.string.save_and_rebuild)
+                        } else {
+                            stringResource(R.string.save)
+                        },
                         modifier = Modifier.padding(start = 8.dp),
                         fontWeight = FontWeight.Bold,
                     )

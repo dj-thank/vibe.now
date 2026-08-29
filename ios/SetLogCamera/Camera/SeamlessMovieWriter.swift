@@ -1,6 +1,8 @@
 import AVFoundation
+import CoreImage
 import CoreMedia
 import Foundation
+import UIKit
 
 @MainActor
 final class SessionVideoExporter {
@@ -10,7 +12,7 @@ final class SessionVideoExporter {
         self.store = store
     }
 
-    func export(_ session: SetLogSession) async throws -> URL {
+    func export(_ session: SetLogSession, to destinationURL: URL? = nil) async throws -> URL {
         guard !session.segments.isEmpty else {
             throw StoreError.emptySession
         }
@@ -64,7 +66,7 @@ final class SessionVideoExporter {
 
         destinationVideo.preferredTransform = firstTransform
 
-        let outputURL = store.newOutputURL(sessionID: session.id)
+        let outputURL = destinationURL ?? store.newOutputURL(sessionID: session.id)
         try? FileManager.default.removeItem(at: outputURL)
         guard let exportSession = AVAssetExportSession(
             asset: composition,
@@ -74,6 +76,30 @@ final class SessionVideoExporter {
         }
         exportSession.shouldOptimizeForNetworkUse = true
         exportSession.metadata = try makeMetadata(for: session)
+        if session.effectiveTimestampOverlay.enabled {
+            let renderer = TimestampFrameRenderer(
+                segments: session.segments,
+                settings: session.effectiveTimestampOverlay
+            )
+            exportSession.videoComposition = AVVideoComposition(
+                asset: composition,
+                applyingCIFiltersWithHandler: { request in
+                    let source = request.sourceImage.clampedToExtent()
+                    guard let overlay = renderer.overlayImage(
+                        at: request.compositionTime,
+                        renderSize: request.renderSize,
+                        sourceExtent: source.extent
+                    ) else {
+                        request.finish(with: source.cropped(to: request.sourceImage.extent), context: nil)
+                        return
+                    }
+                    let result = overlay
+                        .composited(over: source)
+                        .cropped(to: request.sourceImage.extent)
+                    request.finish(with: result, context: nil)
+                }
+            )
+        }
         try await exportSession.export(to: outputURL, as: .mp4)
 
         guard
@@ -87,13 +113,15 @@ final class SessionVideoExporter {
 
     private func makeMetadata(for session: SetLogSession) throws -> [AVMetadataItem] {
         let payload = EmbeddedSessionMetadata(
-            schema: "app.setlog.session.v1",
+            schema: "app.vibenow.session.v2",
             sessionID: session.id,
             title: session.title,
             caption: session.caption,
             createdAt: session.createdAt,
             durationSeconds: session.totalDurationSeconds,
-            markers: session.markers
+            markers: session.markers,
+            timestampOverlay: session.effectiveTimestampOverlay,
+            imported: session.isImported
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -119,6 +147,108 @@ final class SessionVideoExporter {
     }
 }
 
+private final class TimestampFrameRenderer: @unchecked Sendable {
+    private let segments: [SegmentRecord]
+    private let settings: TimestampOverlaySettings
+    private let lock = NSLock()
+    private var cachedKey: String?
+    private var cachedImage: CIImage?
+    private let formatter: DateFormatter
+
+    init(segments: [SegmentRecord], settings: TimestampOverlaySettings) {
+        self.segments = segments.sorted(by: { $0.ordinal < $1.ordinal })
+        self.settings = settings.sanitized
+        formatter = DateFormatter()
+        formatter.locale = Locale.current
+        formatter.dateFormat = "yyyy-MM-dd  HH:mm:ss"
+    }
+
+    func overlayImage(
+        at compositionTime: CMTime,
+        renderSize: CGSize,
+        sourceExtent: CGRect
+    ) -> CIImage? {
+        guard settings.enabled else { return nil }
+        let seconds = max(0, CMTimeGetSeconds(compositionTime).isFinite
+            ? CMTimeGetSeconds(compositionTime)
+            : 0)
+        let captureDate = captureDate(at: seconds)
+        let wholeSecond = Int(captureDate.timeIntervalSince1970.rounded(.down))
+        let key = "\(wholeSecond)-\(Int(renderSize.width))-\(Int(renderSize.height))-\(settings.scale)-\(settings.style.rawValue)"
+
+        let image: CIImage? = lock.withCriticalSection {
+            if cachedKey == key { return cachedImage }
+            let text = formatter.string(from: captureDate)
+            let rendered = render(text: text, renderSize: renderSize)
+            cachedKey = key
+            cachedImage = rendered
+            return rendered
+        }
+        guard let image else { return nil }
+
+        let x = sourceExtent.minX + sourceExtent.width * settings.x - image.extent.width / 2
+        let y = sourceExtent.minY + sourceExtent.height * (1 - settings.y) - image.extent.height / 2
+        return image.transformed(by: CGAffineTransform(translationX: x, y: y))
+    }
+
+    private func captureDate(at timelineSeconds: Double) -> Date {
+        var cursor = 0.0
+        for segment in segments {
+            let end = cursor + max(segment.durationSeconds, 0)
+            if timelineSeconds <= end || segment.id == segments.last?.id {
+                return segment.startedAt.addingTimeInterval(max(0, timelineSeconds - cursor))
+            }
+            cursor = end
+        }
+        return segments.first?.startedAt ?? Date(timeIntervalSince1970: 0)
+    }
+
+    private func render(text: String, renderSize: CGSize) -> CIImage? {
+        let base = max(24, min(renderSize.width, renderSize.height) * 0.034)
+        let pointSize = base * settings.scale
+        let font: UIFont = settings.style == .monospaced
+            ? .monospacedSystemFont(ofSize: pointSize, weight: .semibold)
+            : .systemFont(ofSize: pointSize, weight: .semibold)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: UIColor.white,
+        ]
+        let measured = (text as NSString).size(withAttributes: attributes)
+        let horizontalPadding = settings.style == .boxed ? pointSize * 0.42 : pointSize * 0.08
+        let verticalPadding = settings.style == .boxed ? pointSize * 0.24 : pointSize * 0.08
+        let canvasSize = CGSize(
+            width: ceil(measured.width + horizontalPadding * 2),
+            height: ceil(measured.height + verticalPadding * 2)
+        )
+        let format = UIGraphicsImageRendererFormat()
+        format.opaque = false
+        format.scale = 1
+        let image = UIGraphicsImageRenderer(size: canvasSize, format: format).image { context in
+            if settings.style == .boxed {
+                UIColor.black.withAlphaComponent(0.68).setFill()
+                UIBezierPath(
+                    roundedRect: CGRect(origin: .zero, size: canvasSize),
+                    cornerRadius: pointSize * 0.20
+                ).fill()
+            }
+            (text as NSString).draw(
+                at: CGPoint(x: horizontalPadding, y: verticalPadding),
+                withAttributes: attributes
+            )
+            context.cgContext.flush()
+        }
+        return CIImage(image: image)
+    }
+}
+
+private extension NSLock {
+    func withCriticalSection<T>(_ body: () -> T) -> T {
+        lock()
+        defer { unlock() }
+        return body()
+    }
+}
+
 private struct EmbeddedSessionMetadata: Encodable {
     let schema: String
     let sessionID: UUID
@@ -127,6 +257,8 @@ private struct EmbeddedSessionMetadata: Encodable {
     let createdAt: Date
     let durationSeconds: Double
     let markers: [CaptureMarker]
+    let timestampOverlay: TimestampOverlaySettings
+    let imported: Bool
 }
 
 enum ExportError: LocalizedError {
