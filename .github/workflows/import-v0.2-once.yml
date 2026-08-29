@@ -1,0 +1,83 @@
+name: Import Vibe.now v0.2 once
+
+on:
+  push:
+    branches:
+      - tmp/v0.2-import-carrier
+    paths:
+      - ".github/workflows/import-v0.2-once.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout carrier branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct and verify patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find build-inputs/v0.2 -maxdepth 1 -name 'patch.part.*' | wc -l)" -eq 4
+          cat build-inputs/v0.2/patch.part.* | base64 --decode > /tmp/vibenow-v0.2.patch.xz
+          echo "eb18478e08f133e5711cf73aab520f900cac53c2a879506bfe789ff73d5a9164  /tmp/vibenow-v0.2.patch.xz" | sha256sum --check --strict
+          xz --decompress --stdout /tmp/vibenow-v0.2.patch.xz > /tmp/vibenow-v0.2.patch
+
+      - name: Apply patch onto clean feature branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          FEATURE_BRANCH="feat/vibe-now-controls-overlay-v0.2"
+          EXPECTED_BASE="2828bcdce4833877f2845f766e095b4562fb6e18"
+
+          git fetch origin "refs/heads/${FEATURE_BRANCH}"
+          ACTUAL_BASE="$(git rev-parse FETCH_HEAD)"
+          test "$ACTUAL_BASE" = "$EXPECTED_BASE"
+          git checkout --detach "$ACTUAL_BASE"
+
+          git apply \
+            --index \
+            --whitespace=error-all \
+            --exclude=.github/workflows/archive-source-once.yml \
+            /tmp/vibenow-v0.2.patch
+
+          test "$(git diff --cached --name-only | wc -l)" -eq 42
+          grep -q '<string name="app_name">Vibe.now</string>' android/app/src/main/res/values/strings.xml
+          grep -q '<string name="app_name">Vibe.now</string>' android/app/src/main/res/values-ja/strings.xml
+          grep -q '<string>Vibe.now</string>' ios/SetLogCamera/Resources/Info.plist
+          grep -q 'versionName = "0.2.0"' android/app/build.gradle.kts
+          grep -q 'MARKETING_VERSION = 0.2.0' ios/SetLogCamera.xcodeproj/project.pbxproj
+
+          if grep -R -E 'VolumeChord|bothVolumeKeys|chordDetector' android/app/src/main ios/SetLogCamera; then
+            echo "Legacy simultaneous-volume shortcut remains" >&2
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import plistlib
+          import xml.etree.ElementTree as ET
+
+          for path in Path('android/app/src/main/res').glob('values*/strings.xml'):
+              ET.parse(path)
+          for path in (
+              Path('ios/SetLogCamera/Resources/Info.plist'),
+              Path('ios/SetLogCamera/Resources/PrivacyInfo.xcprivacy'),
+          ):
+              with path.open('rb') as handle:
+                  plistlib.load(handle)
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat: improve Vibe.now controls, camera switching, gallery, and timestamps"
+          git push \
+            --force-with-lease="refs/heads/${FEATURE_BRANCH}:${EXPECTED_BASE}" \
+            origin "HEAD:refs/heads/${FEATURE_BRANCH}"
