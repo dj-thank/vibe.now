@@ -400,17 +400,19 @@ private struct CaptureStatusPill: View {
         if switching { return String(localized: "status.switching") }
         switch phase {
         case .recording:
-            String(localized: "status.recording")
+            return String(localized: "status.recording")
         case .savingClip:
-            String(localized: "status.paused")
+            return String(localized: "status.paused")
         case .exporting:
-            String(localized: "status.saving")
+            return String(localized: "status.saving")
         case .failed:
-            String(localized: "status.problem")
+            return String(localized: "status.problem")
         case .preparing:
-            String(localized: "status.preparing")
+            return String(localized: "status.preparing")
         case .ready:
-            isRunning ? String(localized: "status.ready") : String(localized: "status.camera-wait")
+            return isRunning
+                ? String(localized: "status.ready")
+                : String(localized: "status.camera-wait")
         }
     }
 
@@ -418,15 +420,15 @@ private struct CaptureStatusPill: View {
         if switching { return .cyan }
         switch phase {
         case .recording:
-            .red
+            return .red
         case .savingClip:
-            .yellow
+            return .yellow
         case .failed:
-            .orange
+            return .orange
         case .exporting, .preparing:
-            .blue
+            return .blue
         case .ready:
-            isRunning ? .green : .gray
+            return isRunning ? .green : .gray
         }
     }
 }

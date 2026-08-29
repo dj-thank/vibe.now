@@ -89,7 +89,7 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
                     snapshot.cameraSwitchInProgress
                 ) {
                     update { it.copy(captureState = CaptureState.FINALIZING_SEGMENT) }
-                    camera.stopSegment()
+                    stopSegmentAfterUnexpectedStart()
                     return
                 }
                 update {
@@ -116,6 +116,10 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
     )
 
     private val exporter = SessionExporter(application, repository)
+
+    private fun stopSegmentAfterUnexpectedStart() {
+        camera.stopSegment()
+    }
 
     fun setPermissions(cameraGranted: Boolean, microphoneGranted: Boolean) {
         cameraPermissionGranted = cameraGranted
