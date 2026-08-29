@@ -1,11 +1,16 @@
+import AVFoundation
 import Foundation
 
 final class SessionStore {
     private let fileManager: FileManager
     private let rootURL: URL
     private let defaults: UserDefaults
-    private let activeSessionKey = "setlog.active-session-id"
-    private let guideSeenKey = "setlog.guide-seen"
+    private let activeSessionKey = "vibenow.active-session-id"
+    private let legacyActiveSessionKey = "setlog.active-session-id"
+    private let guideSeenKey = "vibenow.guide-seen"
+    private let legacyGuideSeenKey = "setlog.guide-seen"
+    private let inputSettingsKey = "vibenow.input-settings"
+    private let timestampSettingsKey = "vibenow.timestamp-settings"
 
     init(
         fileManager: FileManager = .default,
@@ -16,12 +21,14 @@ final class SessionStore {
 
         let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? fileManager.temporaryDirectory
+        // Keep the original directory for seamless migration from v0.1.
         rootURL = base.appending(path: "SetLogCamera/Sessions", directoryHint: .isDirectory)
         try? fileManager.createDirectory(
             at: rootURL,
             withIntermediateDirectories: true,
             attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
         )
+        migrateLegacyPreferences()
         recoverInterruptedWork()
     }
 
@@ -31,6 +38,38 @@ final class SessionStore {
 
     func markGuideSeen() {
         defaults.set(true, forKey: guideSeenKey)
+    }
+
+    func loadInputSettings() -> InputSettings {
+        guard
+            let data = defaults.data(forKey: inputSettingsKey),
+            let settings = try? Self.decoder.decode(InputSettings.self, from: data)
+        else {
+            return InputSettings()
+        }
+        return settings
+    }
+
+    func saveInputSettings(_ settings: InputSettings) {
+        if let data = try? Self.encoder.encode(settings) {
+            defaults.set(data, forKey: inputSettingsKey)
+        }
+    }
+
+    func loadTimestampSettings() -> TimestampOverlaySettings {
+        guard
+            let data = defaults.data(forKey: timestampSettingsKey),
+            let settings = try? Self.decoder.decode(TimestampOverlaySettings.self, from: data)
+        else {
+            return TimestampOverlaySettings()
+        }
+        return settings.sanitized
+    }
+
+    func saveTimestampSettings(_ settings: TimestampOverlaySettings) {
+        if let data = try? Self.encoder.encode(settings.sanitized) {
+            defaults.set(data, forKey: timestampSettingsKey)
+        }
     }
 
     func loadAll() -> [SetLogSession] {
@@ -64,11 +103,17 @@ final class SessionStore {
         return session
     }
 
-    func getOrCreateDraft(now: Date = Date()) throws -> SetLogSession {
+    func getOrCreateDraft(
+        now: Date = Date(),
+        timestampOverlay: TimestampOverlaySettings? = nil
+    ) throws -> SetLogSession {
         if let existing = activeDraft() {
             return existing
         }
-        let session = SetLogSession.draft(now: now)
+        let session = SetLogSession.draft(
+            now: now,
+            timestampOverlay: timestampOverlay ?? loadTimestampSettings()
+        )
         try createSessionDirectory(session.id)
         try write(session)
         defaults.set(session.id.uuidString, forKey: activeSessionKey)
@@ -79,7 +124,11 @@ final class SessionStore {
         readSession(in: sessionDirectory(id))
     }
 
-    func reserveSegment(sessionID: UUID, pressedAt: Date) throws -> PendingSegment {
+    func reserveSegment(
+        sessionID: UUID,
+        pressedAt: Date,
+        createsMarker: Bool = true
+    ) throws -> PendingSegment {
         guard let session = readSession(id: sessionID), session.isResumable else {
             throw StoreError.sessionNotResumable
         }
@@ -93,7 +142,8 @@ final class SessionStore {
             finalFileName: String(format: "segment-%04d-%@.mov", ordinal, segmentID.uuidString),
             startedAt: pressedAt,
             timelineOffsetSeconds: session.totalDurationSeconds,
-            ordinal: ordinal
+            ordinal: ordinal,
+            createsMarker: createsMarker
         )
     }
 
@@ -136,15 +186,17 @@ final class SessionStore {
                 ordinal: pending.ordinal
             )
         )
-        session.markers.append(
-            CaptureMarker(
-                id: UUID(),
-                pressedAt: pending.startedAt,
-                timelineOffsetSeconds: pending.timelineOffsetSeconds,
-                ordinal: pending.ordinal,
-                segmentID: pending.segmentID
+        if pending.createsMarker {
+            session.markers.append(
+                CaptureMarker(
+                    id: UUID(),
+                    pressedAt: pending.startedAt,
+                    timelineOffsetSeconds: pending.timelineOffsetSeconds,
+                    ordinal: session.markers.count + 1,
+                    segmentID: pending.segmentID
+                )
             )
-        )
+        }
         try write(session)
         defaults.set(session.id.uuidString, forKey: activeSessionKey)
         return session
@@ -211,6 +263,20 @@ final class SessionStore {
         return session
     }
 
+    @discardableResult
+    func updateTimestampOverlay(
+        sessionID: UUID,
+        settings: TimestampOverlaySettings
+    ) throws -> SetLogSession {
+        guard var session = readSession(id: sessionID) else {
+            throw StoreError.sessionMissing
+        }
+        session.effectiveTimestampOverlay = settings
+        session.updatedAt = Date()
+        try write(session)
+        return session
+    }
+
     func resume(sessionID: UUID) throws -> SetLogSession {
         guard var session = readSession(id: sessionID), session.isResumable else {
             throw StoreError.sessionNotResumable
@@ -220,6 +286,99 @@ final class SessionStore {
         session.updatedAt = Date()
         try write(session)
         defaults.set(session.id.uuidString, forKey: activeSessionKey)
+        return session
+    }
+
+    func importVideo(from sourceURL: URL, durationSeconds: Double) throws -> SetLogSession {
+        let now = Date()
+        let sessionID = UUID()
+        try createSessionDirectory(sessionID)
+        let directory = sessionDirectory(sessionID)
+        let rawExtension = sourceURL.pathExtension.lowercased()
+        let fileExtension = rawExtension.range(of: #"^[a-z0-9]{1,8}$"#, options: .regularExpression) != nil
+            ? rawExtension
+            : "mov"
+        let sourceFileName = "segment-0001-import.\(fileExtension)"
+        let outputFileName = "vibe-\(sessionID.uuidString).\(fileExtension)"
+        let sourceCopy = directory.appending(path: sourceFileName)
+        let outputCopy = directory.appending(path: outputFileName)
+
+        do {
+            try fileManager.copyItem(at: sourceURL, to: sourceCopy)
+            try fileManager.copyItem(at: sourceURL, to: outputCopy)
+            let sourceDate = (try? sourceURL.resourceValues(
+                forKeys: [.creationDateKey, .contentModificationDateKey]
+            ).creationDate) ?? now
+            let segmentID = UUID()
+            var session = SetLogSession(
+                id: sessionID,
+                title: String(sourceURL.deletingPathExtension().lastPathComponent.prefix(80)),
+                caption: "",
+                createdAt: sourceDate,
+                updatedAt: now,
+                status: .ready,
+                outputFileName: outputFileName,
+                segments: [
+                    SegmentRecord(
+                        id: segmentID,
+                        fileName: sourceFileName,
+                        startedAt: sourceDate,
+                        durationSeconds: max(durationSeconds, 0.001),
+                        ordinal: 1
+                    )
+                ],
+                markers: [],
+                totalDurationSeconds: max(durationSeconds, 0.001),
+                errorMessage: nil,
+                timestampOverlay: loadTimestampSettings(),
+                imported: true
+            )
+            if session.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                session.title = "Vibe.now \(DateFormatters.fileTitle.string(from: now))"
+            }
+            try write(session)
+            return session
+        } catch {
+            try? fileManager.removeItem(at: directory)
+            throw error
+        }
+    }
+
+    func installRebuiltOutput(
+        sessionID: UUID,
+        temporaryURL: URL,
+        outputFileName: String
+    ) throws -> SetLogSession {
+        guard var session = readSession(id: sessionID) else {
+            throw StoreError.sessionMissing
+        }
+        let target = sessionDirectory(sessionID).appending(path: outputFileName)
+        let backup = sessionDirectory(sessionID).appending(path: "\(outputFileName).backup")
+        try? fileManager.removeItem(at: backup)
+        if fileManager.fileExists(atPath: target.path) {
+            try fileManager.moveItem(at: target, to: backup)
+        }
+        do {
+            try fileManager.moveItem(at: temporaryURL, to: target)
+            try? fileManager.removeItem(at: backup)
+        } catch {
+            try? fileManager.removeItem(at: target)
+            if fileManager.fileExists(atPath: backup.path) {
+                try? fileManager.moveItem(at: backup, to: target)
+            }
+            throw error
+        }
+        let previousOutputFileName = session.outputFileName
+        session.status = .ready
+        session.outputFileName = outputFileName
+        session.errorMessage = nil
+        session.updatedAt = Date()
+        try write(session)
+        if let previousOutputFileName, previousOutputFileName != outputFileName {
+            try? fileManager.removeItem(
+                at: sessionDirectory(sessionID).appending(path: previousOutputFileName)
+            )
+        }
         return session
     }
 
@@ -249,7 +408,11 @@ final class SessionStore {
     }
 
     func newOutputURL(sessionID: UUID) -> URL {
-        sessionDirectory(sessionID).appending(path: "setlog-\(sessionID.uuidString).mp4")
+        sessionDirectory(sessionID).appending(path: "vibe-\(sessionID.uuidString).mp4")
+    }
+
+    func temporaryRebuildURL(sessionID: UUID) -> URL {
+        sessionDirectory(sessionID).appending(path: "vibe-\(sessionID.uuidString).rebuild.mp4")
     }
 
     func makeShareCopy(for session: SetLogSession) throws -> URL {
@@ -257,24 +420,29 @@ final class SessionStore {
             throw StoreError.outputMissing
         }
         let shareDirectory = fileManager.temporaryDirectory
-            .appending(path: "SetLogCameraShare", directoryHint: .isDirectory)
+            .appending(path: "VibeNowShare", directoryHint: .isDirectory)
         try? fileManager.removeItem(at: shareDirectory)
         try fileManager.createDirectory(at: shareDirectory, withIntermediateDirectories: true)
-        let destination = shareDirectory.appending(path: "\(sanitizedFileStem(session.title)).mp4")
+        let fileExtension = source.pathExtension.isEmpty ? "mp4" : source.pathExtension
+        let destination = shareDirectory.appending(
+            path: "\(sanitizedFileStem(session.title)).\(fileExtension)"
+        )
         try fileManager.copyItem(at: source, to: destination)
 
         let sidecar = ShareMetadata(
-            schema: "app.setlog.session.v1",
+            schema: "app.vibenow.session.v2",
             sessionID: session.id,
             title: session.title,
             caption: session.caption,
             createdAt: session.createdAt,
             durationSeconds: session.totalDurationSeconds,
-            markers: session.markers
+            markers: session.markers,
+            timestampOverlay: session.effectiveTimestampOverlay,
+            imported: session.isImported
         )
         let metadataData = try Self.encoder.encode(sidecar)
         try metadataData.write(
-            to: shareDirectory.appending(path: "\(sanitizedFileStem(session.title))-setlog.json"),
+            to: shareDirectory.appending(path: "\(sanitizedFileStem(session.title))-vibenow.json"),
             options: .atomic
         )
         return destination
@@ -309,6 +477,17 @@ final class SessionStore {
             to: manifestURL(in: sessionDirectory(session.id)),
             options: [.atomic, .completeFileProtectionUnlessOpen]
         )
+    }
+
+    private func migrateLegacyPreferences() {
+        if defaults.string(forKey: activeSessionKey) == nil,
+           let legacy = defaults.string(forKey: legacyActiveSessionKey) {
+            defaults.set(legacy, forKey: activeSessionKey)
+        }
+        if defaults.object(forKey: guideSeenKey) == nil,
+           defaults.object(forKey: legacyGuideSeenKey) != nil {
+            defaults.set(defaults.bool(forKey: legacyGuideSeenKey), forKey: guideSeenKey)
+        }
     }
 
     private func recoverInterruptedWork() {
@@ -357,6 +536,8 @@ private struct ShareMetadata: Encodable {
     let createdAt: Date
     let durationSeconds: Double
     let markers: [CaptureMarker]
+    let timestampOverlay: TimestampOverlaySettings
+    let imported: Bool
 }
 
 enum StoreError: LocalizedError {

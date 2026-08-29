@@ -3,6 +3,7 @@ import SwiftUI
 
 struct CameraScreen: View {
     @ObservedObject var viewModel: CameraViewModel
+    @State private var settingsPresented = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -20,12 +21,21 @@ struct CameraScreen: View {
                 .ignoresSafeArea()
 
                 LinearGradient(
-                    colors: [.black.opacity(0.58), .clear, .black.opacity(0.72)],
+                    colors: [.black.opacity(0.48), .clear, .black.opacity(0.78)],
                     startPoint: .top,
                     endPoint: .bottom
                 )
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
+
+                if viewModel.timestampSettings.enabled {
+                    TimestampOverlayPreview(
+                        settings: .constant(viewModel.timestampSettings),
+                        interactive: false
+                    )
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                }
 
                 if viewModel.capturePhase == .recording {
                     RecordingEdgeGlow()
@@ -41,144 +51,196 @@ struct CameraScreen: View {
                 }
 
                 VStack(spacing: 0) {
-                    topBar
+                    statusHeader
                     Spacer()
-                    bottomPanel
+                    bottomControls
                 }
                 .padding(.horizontal, 18)
                 .padding(.top, max(10, geometry.safeAreaInsets.top + 4))
                 .padding(.bottom, max(12, geometry.safeAreaInsets.bottom + 2))
             }
             .animation(.easeInOut(duration: 0.2), value: viewModel.capturePhase)
+            .animation(.easeInOut(duration: 0.2), value: viewModel.cameraSwitchInProgress)
         }
         .statusBarHidden()
+        .sheet(isPresented: $settingsPresented) {
+            CameraControlSettingsSheet(viewModel: viewModel)
+        }
     }
 
-    private var topBar: some View {
-        ZStack {
-            HStack {
-                Button(action: viewModel.openGalleryWithoutFinalizing) {
-                    ZStack(alignment: .topTrailing) {
-                        Image(systemName: "rectangle.stack.fill")
-                            .font(.system(size: 18, weight: .semibold))
-                            .frame(width: 48, height: 48)
-                            .background(.black.opacity(0.48), in: Circle())
-                            .overlay(Circle().stroke(.white.opacity(0.22), lineWidth: 1))
-                        if !viewModel.sessions.isEmpty {
-                            Text("\(viewModel.sessions.count)")
-                                .font(.caption2.bold())
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 2)
-                                .background(.red, in: Capsule())
-                                .offset(x: 4, y: -2)
-                        }
-                    }
-                }
-                .accessibilityLabel(String(localized: "camera.open-gallery"))
-
-                Spacer()
-
-                Button(action: viewModel.switchCamera) {
-                    Image(systemName: "arrow.triangle.2.circlepath.camera.fill")
-                        .font(.system(size: 20, weight: .semibold))
-                        .frame(width: 48, height: 48)
-                        .background(.black.opacity(0.48), in: Circle())
-                        .overlay(Circle().stroke(.white.opacity(0.22), lineWidth: 1))
-                }
-                .disabled(viewModel.capturePhase != .ready || !viewModel.isSessionRunning)
-                .opacity(viewModel.capturePhase == .ready ? 1 : 0.45)
-                .accessibilityLabel(String(localized: "camera.switch"))
-            }
-
+    private var statusHeader: some View {
+        HStack(alignment: .center) {
             CaptureStatusPill(
                 phase: viewModel.capturePhase,
-                isRunning: viewModel.isSessionRunning
+                isRunning: viewModel.isSessionRunning,
+                switching: viewModel.cameraSwitchInProgress
             )
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(formatDuration(viewModel.displayedDuration))
+                    .font(.system(.headline, design: .monospaced, weight: .semibold))
+                    .monospacedDigit()
+                Text(
+                    String(
+                        format: String(localized: "camera.marker-count.format"),
+                        viewModel.markerCount
+                    )
+                )
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.72))
+            }
         }
         .foregroundStyle(.white)
     }
 
-    private var bottomPanel: some View {
-        VStack(spacing: 13) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(formatDuration(viewModel.displayedDuration))
-                        .font(.system(.title2, design: .monospaced, weight: .semibold))
-                    Text(
-                        String(
-                            format: String(localized: "camera.marker-count.format"),
-                            viewModel.markerCount
-                        )
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
+    private var bottomControls: some View {
+        VStack(spacing: 14) {
+            instructionCard
+
+            HStack(alignment: .center) {
+                NativeCameraControlButton(
+                    symbol: "photo.stack.fill",
+                    label: String(localized: "camera.open-gallery"),
+                    badge: viewModel.sessions.isEmpty ? nil : viewModel.sessions.count,
+                    action: viewModel.openGalleryWithoutFinalizing
+                )
+
                 Spacer()
-                if viewModel.zoomFactor > 1.01 {
-                    Text(String(format: "%.1f×", viewModel.zoomFactor))
-                        .font(.caption.monospacedDigit().bold())
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(.white.opacity(0.12), in: Capsule())
-                }
-            }
 
-            HStack(spacing: 13) {
-                Image(systemName: instructionSymbol)
-                    .font(.system(size: 26, weight: .bold))
-                    .foregroundStyle(instructionAccent)
-                    .frame(width: 38)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(instructionTitle)
-                        .font(.headline)
-                    Text(instructionBody)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
-            }
+                PhysicalRecordIndicator(
+                    control: viewModel.recordControl,
+                    isRecording: viewModel.capturePhase == .recording
+                )
 
-            if viewModel.hasDraftContent || viewModel.capturePhase == .recording || viewModel.capturePhase == .savingClip {
-                Button(action: viewModel.finishFromScreen) {
-                    HStack(spacing: 9) {
-                        Image(systemName: "checkmark.circle.fill")
-                        Text(String(localized: "camera.finish"))
-                            .fontWeight(.semibold)
+                Spacer()
+
+                NativeCameraControlButton(
+                    symbol: "arrow.triangle.2.circlepath.camera.fill",
+                    label: String(localized: "camera.switch"),
+                    showsProgress: viewModel.cameraSwitchInProgress,
+                    action: viewModel.switchCamera
+                )
+                .disabled(!canSwitchCamera)
+                .opacity(canSwitchCamera ? 1 : 0.42)
+            }
+            .padding(.horizontal, 2)
+
+            HStack(spacing: 12) {
+                Button {
+                    settingsPresented = true
+                } label: {
+                    Label(String(localized: "camera.settings"), systemImage: "slider.horizontal.3")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .tint(.white)
+                .disabled(!canOpenSettings)
+
+                if viewModel.hasDraftContent
+                    || viewModel.capturePhase == .recording
+                    || viewModel.capturePhase == .savingClip
+                {
+                    Button(action: viewModel.finishFromScreen) {
+                        Label(String(localized: "camera.finish"), systemImage: "stop.circle.fill")
+                            .frame(maxWidth: .infinity)
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 13)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .disabled(viewModel.capturePhase == .exporting)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white)
-                .background(.red, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .disabled(viewModel.capturePhase == .exporting)
-                .opacity(viewModel.capturePhase == .exporting ? 0.55 : 1)
             }
+            .font(.subheadline.weight(.semibold))
 
-            HStack(spacing: 8) {
-                Label(String(localized: "camera.shortcut.gallery"), systemImage: "minus.circle")
-                Text("•")
-                Label(String(localized: "camera.shortcut.finish.ios"), systemImage: "minus.circle.fill")
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .minimumScaleFactor(0.72)
+            Text(shortcutSummary)
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.68))
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .minimumScaleFactor(0.78)
         }
-        .padding(17)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .padding(16)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(.white.opacity(0.16), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(.white.opacity(0.17), lineWidth: 1)
         )
         .foregroundStyle(.white)
+    }
+
+    private var instructionCard: some View {
+        HStack(spacing: 12) {
+            Image(systemName: instructionSymbol)
+                .font(.system(size: 25, weight: .semibold))
+                .foregroundStyle(instructionAccent)
+                .frame(width: 34)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(instructionTitle)
+                    .font(.headline)
+                Text(instructionBody)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.72))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            if viewModel.zoomFactor > 1.01 {
+                Text(String(format: "%.1f×", viewModel.zoomFactor))
+                    .font(.caption.monospacedDigit().bold())
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(.white.opacity(0.14), in: Capsule())
+            }
+        }
+    }
+
+    private var canSwitchCamera: Bool {
+        viewModel.captureEventsEnabled
+            && viewModel.capturePhase != .exporting
+            && viewModel.capturePhase != .savingClip
+            && !viewModel.cameraSwitchInProgress
+    }
+
+    private var canOpenSettings: Bool {
+        switch viewModel.capturePhase {
+        case .ready, .failed:
+            !viewModel.cameraSwitchInProgress
+        case .preparing, .recording, .savingClip, .exporting:
+            false
+        }
+    }
+
+    private var shortcutSummary: String {
+        let key = controlName(viewModel.shortcutControl)
+        let double = actionName(viewModel.inputSettings.doublePressAction)
+        let triple = actionName(viewModel.inputSettings.triplePressAction)
+        return String(
+            format: String(localized: "camera.shortcut.summary.format"),
+            key,
+            double,
+            triple
+        )
+    }
+
+    private func controlName(_ control: CaptureControl) -> String {
+        String(localized: control == .secondary ? "control.secondary" : "control.primary")
+    }
+
+    private func actionName(_ action: ShortcutAction) -> String {
+        switch action {
+        case .finish:
+            String(localized: "shortcut.action.finish")
+        case .openGallery:
+            String(localized: "shortcut.action.gallery")
+        case .none:
+            String(localized: "shortcut.action.none")
+        }
     }
 
     private var instructionTitle: String {
         switch viewModel.capturePhase {
         case .preparing:
-            String(localized: "camera.state.preparing")
+            viewModel.cameraSwitchInProgress
+                ? String(localized: "camera.state.switching")
+                : String(localized: "camera.state.preparing")
         case .ready:
             viewModel.hasDraftContent
                 ? String(localized: "camera.state.resume")
@@ -197,9 +259,14 @@ struct CameraScreen: View {
     private var instructionBody: String {
         switch viewModel.capturePhase {
         case .preparing:
-            String(localized: "camera.state.preparing.body")
+            viewModel.cameraSwitchInProgress
+                ? String(localized: "camera.state.switching.body")
+                : String(localized: "camera.state.preparing.body")
         case .ready:
-            String(localized: "camera.state.ready.body")
+            String(
+                format: String(localized: "camera.state.ready.body.format"),
+                controlName(viewModel.recordControl)
+            )
         case .recording:
             String(localized: "camera.state.recording.body")
         case .savingClip:
@@ -222,9 +289,9 @@ struct CameraScreen: View {
         case .failed:
             "exclamationmark.triangle.fill"
         case .preparing:
-            "hourglass"
+            viewModel.cameraSwitchInProgress ? "arrow.triangle.2.circlepath.camera.fill" : "hourglass"
         case .ready:
-            "plus.circle.fill"
+            viewModel.recordControl == .secondary ? "plus.circle.fill" : "minus.circle.fill"
         }
     }
 
@@ -234,15 +301,85 @@ struct CameraScreen: View {
             .red
         case .savingClip:
             .yellow
+        case .preparing where viewModel.cameraSwitchInProgress:
+            .cyan
         default:
             .white
         }
     }
 }
 
+private struct NativeCameraControlButton: View {
+    let symbol: String
+    let label: String
+    var badge: Int?
+    var showsProgress = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack(alignment: .topTrailing) {
+                ZStack {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                    Circle()
+                        .stroke(.white.opacity(0.26), lineWidth: 1)
+                    if showsProgress {
+                        ProgressView()
+                            .tint(.white)
+                    } else {
+                        Image(systemName: symbol)
+                            .font(.system(size: 21, weight: .semibold))
+                    }
+                }
+                .frame(width: 54, height: 54)
+
+                if let badge {
+                    Text("\(badge)")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(.red, in: Capsule())
+                        .offset(x: 5, y: -3)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+}
+
+private struct PhysicalRecordIndicator: View {
+    let control: CaptureControl
+    let isRecording: Bool
+
+    var body: some View {
+        VStack(spacing: 5) {
+            ZStack {
+                Circle()
+                    .stroke(.white, lineWidth: 4)
+                    .frame(width: 72, height: 72)
+                Circle()
+                    .fill(isRecording ? Color.red : Color.white.opacity(0.92))
+                    .frame(width: isRecording ? 56 : 60, height: isRecording ? 56 : 60)
+                    .animation(.easeInOut(duration: 0.18), value: isRecording)
+                Text(control == .secondary ? "+" : "−")
+                    .font(.system(size: 30, weight: .bold, design: .rounded))
+                    .foregroundStyle(isRecording ? .white : .black)
+            }
+            Text(String(localized: "camera.hold"))
+                .font(.caption2.bold())
+                .foregroundStyle(.white.opacity(0.78))
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
 private struct CaptureStatusPill: View {
     let phase: CapturePhase
     let isRunning: Bool
+    let switching: Bool
 
     var body: some View {
         HStack(spacing: 7) {
@@ -255,11 +392,12 @@ private struct CaptureStatusPill: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.black.opacity(0.56), in: Capsule())
+        .background(.black.opacity(0.52), in: Capsule())
         .overlay(Capsule().stroke(.white.opacity(0.16), lineWidth: 1))
     }
 
     private var label: String {
+        if switching { return String(localized: "status.switching") }
         switch phase {
         case .recording:
             String(localized: "status.recording")
@@ -277,6 +415,7 @@ private struct CaptureStatusPill: View {
     }
 
     private var dotColor: Color {
+        if switching { return .cyan }
         switch phase {
         case .recording:
             .red

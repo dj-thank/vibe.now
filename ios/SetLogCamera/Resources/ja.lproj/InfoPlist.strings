@@ -1,3 +1,3 @@
-"CFBundleDisplayName" = "セットログ";
-"NSCameraUsageDescription" = "音量＋を押している間に動画を撮影するため、カメラを使用します。";
-"NSMicrophoneUsageDescription" = "撮影した動画に音声を含めるため、マイクを使用します。";
+"CFBundleDisplayName" = "Vibe.now";
+"NSCameraUsageDescription" = "Vibe.nowは、設定した本体の撮影操作を押している間だけ動画を記録するためにカメラを使用します。";
+"NSMicrophoneUsageDescription" = "Vibe.nowは、録画へ音声を含めるためにマイクを使用します。";

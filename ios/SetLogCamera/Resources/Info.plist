@@ -5,7 +5,7 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>
-  <string>SetLog Camera</string>
+  <string>Vibe.now</string>
   <key>CFBundleExecutable</key>
   <string>$(EXECUTABLE_NAME)</string>
   <key>CFBundleIdentifier</key>
@@ -25,9 +25,9 @@
   <key>LSRequiresIPhoneOS</key>
   <true/>
   <key>NSCameraUsageDescription</key>
-  <string>SetLog Camera uses the camera to record video clips while you hold Volume Up.</string>
+  <string>Vibe.now uses the camera to record video while you hold your selected physical capture control.</string>
   <key>NSMicrophoneUsageDescription</key>
-  <string>SetLog Camera uses the microphone to include sound in recorded videos.</string>
+  <string>Vibe.now uses the microphone to include sound in recorded videos.</string>
   <key>UIApplicationSupportsIndirectInputEvents</key>
   <true/>
   <key>UILaunchScreen</key>

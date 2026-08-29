@@ -1,6 +1,7 @@
 package app.setlog.capture
 
 import android.app.Application
+import android.net.Uri
 import androidx.camera.view.PreviewView
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LifecycleOwner
@@ -10,19 +11,28 @@ import app.setlog.capture.camera.SegmentCamera
 import app.setlog.capture.data.SessionRepository
 import app.setlog.capture.export.SessionExporter
 import app.setlog.capture.model.CaptureState
+import app.setlog.capture.model.InputSettings
 import app.setlog.capture.model.MainScreen
 import app.setlog.capture.model.PendingSegment
 import app.setlog.capture.model.SessionStatus
 import app.setlog.capture.model.SetLogUiState
+import app.setlog.capture.model.TimestampOverlaySettings
 import app.setlog.capture.model.VideoSession
 import java.io.File
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @UnstableApi
 class SetLogViewModel(application: Application) : AndroidViewModel(application) {
+    private data class QueuedSegmentStart(
+        val pressedAtEpochMs: Long,
+        val createsMarker: Boolean,
+    )
+
     private val repository = SessionRepository(application)
     private val mutableState = MutableStateFlow(loadInitialState())
     val state: StateFlow<SetLogUiState> = mutableState.asStateFlow()
@@ -30,29 +40,43 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
     private var cameraPermissionGranted = false
     private var microphonePermissionGranted = false
     private var pendingSegment: PendingSegment? = null
-    private var queuedPressEpochMs: Long? = null
+    private var queuedSegmentStart: QueuedSegmentStart? = null
     private var finishRequested = false
     private var navigationToGalleryRequested = false
+    private var switchAfterSegmentFinalizes = false
+    private var resumeAfterCameraSwitch = false
 
     private val camera = SegmentCamera(
         context = application,
         listener = object : SegmentCamera.Listener {
             override fun onCameraReady(usingFrontCamera: Boolean) {
+                val shouldResume = resumeAfterCameraSwitch && mutableState.value.volumeUpHeld
+                resumeAfterCameraSwitch = false
                 update {
                     it.copy(
                         cameraReady = true,
                         usingFrontCamera = usingFrontCamera,
-                        captureState = idleCaptureState(it.activeSession),
+                        cameraSwitchInProgress = false,
+                        captureState = idleCaptureState(it.activeSession, cameraReady = true),
                         errorMessage = null,
+                    )
+                }
+                if (shouldResume && queuedSegmentStart == null) {
+                    queuedSegmentStart = QueuedSegmentStart(
+                        pressedAtEpochMs = System.currentTimeMillis(),
+                        createsMarker = false,
                     )
                 }
                 maybeStartQueuedSegment()
             }
 
             override fun onCameraError(message: String, cause: Throwable?) {
+                resumeAfterCameraSwitch = false
+                switchAfterSegmentFinalizes = false
                 update {
                     it.copy(
                         cameraReady = false,
+                        cameraSwitchInProgress = false,
                         captureState = CaptureState.ERROR,
                         errorMessage = message,
                     )
@@ -60,6 +84,14 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             override fun onSegmentStarted() {
+                val snapshot = mutableState.value
+                if (!snapshot.volumeUpHeld || finishRequested || navigationToGalleryRequested ||
+                    snapshot.cameraSwitchInProgress
+                ) {
+                    update { it.copy(captureState = CaptureState.FINALIZING_SEGMENT) }
+                    camera.stopSegment()
+                    return
+                }
                 update {
                     it.copy(
                         captureState = CaptureState.RECORDING,
@@ -99,21 +131,25 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun attachPreview(previewView: PreviewView, lifecycleOwner: LifecycleOwner) {
-        if (!cameraPermissionGranted) {
-            return
+        if (cameraPermissionGranted) {
+            camera.attach(previewView, lifecycleOwner)
         }
-        camera.attach(previewView, lifecycleOwner)
     }
 
     fun detachPreview(previewView: PreviewView) {
         camera.detachPreview(previewView)
     }
 
-    fun onVolumeUpHoldStarted(pressedAtEpochMs: Long) {
-        if (mutableState.value.captureState == CaptureState.EXPORTING) {
-            return
-        }
-        queuedPressEpochMs = pressedAtEpochMs
+    fun inputSettingsSnapshot(): InputSettings = mutableState.value.inputSettings
+
+    fun saveInputSettings(settings: InputSettings) {
+        repository.saveInputSettings(settings)
+        update { it.copy(inputSettings = settings) }
+    }
+
+    fun onRecordHoldStarted(pressedAtEpochMs: Long) {
+        if (mutableState.value.captureState == CaptureState.EXPORTING) return
+        queuedSegmentStart = QueuedSegmentStart(pressedAtEpochMs, createsMarker = true)
         navigationToGalleryRequested = false
         update {
             it.copy(
@@ -126,19 +162,22 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
         maybeStartQueuedSegment()
     }
 
-    fun onVolumeUpHoldEnded() {
-        queuedPressEpochMs = null
+    fun onRecordHoldEnded() {
+        queuedSegmentStart = null
+        resumeAfterCameraSwitch = false
         update { it.copy(volumeUpHeld = false) }
         if (camera.isRecording()) {
             update { it.copy(captureState = CaptureState.FINALIZING_SEGMENT) }
             camera.stopSegment()
-        } else if (pendingSegment == null && !finishRequested) {
+        } else if (pendingSegment == null && !finishRequested && !itIsSwitching()) {
             update { it.copy(captureState = idleCaptureState(it.activeSession)) }
         }
     }
 
     fun finishCurrentSession() {
-        queuedPressEpochMs = null
+        queuedSegmentStart = null
+        resumeAfterCameraSwitch = false
+        switchAfterSegmentFinalizes = false
         finishRequested = true
         navigationToGalleryRequested = true
         update {
@@ -146,6 +185,7 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
                 volumeUpHeld = false,
                 screen = MainScreen.GALLERY,
                 selectedSessionId = it.activeSession?.id,
+                cameraSwitchInProgress = false,
             )
         }
         if (camera.isRecording()) {
@@ -157,7 +197,8 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun openGalleryWithoutFinishing() {
-        queuedPressEpochMs = null
+        queuedSegmentStart = null
+        resumeAfterCameraSwitch = false
         finishRequested = false
         navigationToGalleryRequested = true
         update {
@@ -173,9 +214,7 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun openGalleryFromUi() {
-        openGalleryWithoutFinishing()
-    }
+    fun openGalleryFromUi() = openGalleryWithoutFinishing()
 
     fun openCamera() {
         navigationToGalleryRequested = false
@@ -199,6 +238,7 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             session
         }
+        if (!draft.isDraft) return
         refresh(activeOverride = draft)
         openCamera()
     }
@@ -231,6 +271,61 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
         refresh()
     }
 
+    fun saveActiveTimestampSettings(settings: TimestampOverlaySettings) {
+        val safe = settings.sanitized()
+        repository.saveTimestampSettings(safe)
+        val active = repository.getActiveDraft()?.let { draft ->
+            repository.updateTimestampOverlay(draft.id, safe)
+        }
+        refresh(activeOverride = active)
+        update { it.copy(timestampSettings = safe) }
+    }
+
+    fun updateSessionAndRebuild(
+        sessionId: String,
+        title: String,
+        caption: String,
+        timestampSettings: TimestampOverlaySettings,
+    ) {
+        repository.updateDetails(sessionId, title, caption)
+        val updated = repository.updateTimestampOverlay(sessionId, timestampSettings)
+        repository.saveTimestampSettings(timestampSettings)
+        update { it.copy(timestampSettings = timestampSettings.sanitized()) }
+        if (updated.status == SessionStatus.READY) {
+            rebuildReadySession(updated.id)
+        } else {
+            refresh()
+        }
+    }
+
+    fun importVideo(uri: Uri) {
+        if (mutableState.value.importInProgress || exporter.isExporting()) return
+        viewModelScope.launch {
+            update { it.copy(importInProgress = true, errorMessage = null) }
+            val result = runCatching {
+                withContext(Dispatchers.IO) { repository.importVideo(uri) }
+            }
+            result.onSuccess { imported ->
+                refresh()
+                update {
+                    it.copy(
+                        screen = MainScreen.GALLERY,
+                        selectedSessionId = imported.id,
+                        importInProgress = false,
+                    )
+                }
+            }.onFailure { error ->
+                update {
+                    it.copy(
+                        importInProgress = false,
+                        errorMessage = error.localizedMessage
+                            ?: getApplication<Application>().getString(R.string.import_failed),
+                    )
+                }
+            }
+        }
+    }
+
     fun deleteSession(sessionId: String) {
         repository.deleteSession(sessionId)
         val active = repository.getActiveDraft()
@@ -243,8 +338,25 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /**
+     * Switching during a hold safely closes the current clip, rebinds the opposite lens and starts
+     * a continuation clip while the hardware key remains down. The continuation does not create a
+     * second press marker.
+     */
     fun switchCamera() {
-        camera.switchCamera()
+        val snapshot = mutableState.value
+        if (snapshot.captureState == CaptureState.EXPORTING || snapshot.cameraSwitchInProgress) return
+
+        update { it.copy(cameraSwitchInProgress = true, errorMessage = null) }
+        if (camera.isRecording() || pendingSegment != null) {
+            switchAfterSegmentFinalizes = true
+            resumeAfterCameraSwitch = snapshot.volumeUpHeld
+            queuedSegmentStart = null
+            update { it.copy(captureState = CaptureState.FINALIZING_SEGMENT) }
+            camera.stopSegment()
+        } else {
+            performCameraSwitch()
+        }
     }
 
     fun dismissFirstGuide() {
@@ -264,7 +376,8 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
             ?: session.segments.firstOrNull()?.let { repository.segmentFile(session.id, it) }
 
     fun onAppBackgrounded() {
-        queuedPressEpochMs = null
+        queuedSegmentStart = null
+        resumeAfterCameraSwitch = false
         update { it.copy(volumeUpHeld = false) }
         if (camera.isRecording()) {
             update { it.copy(captureState = CaptureState.FINALIZING_SEGMENT) }
@@ -272,20 +385,49 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun maybeStartQueuedSegment() {
-        val pressedAt = queuedPressEpochMs ?: return
-        val snapshot = mutableState.value
-        if (!snapshot.volumeUpHeld || !cameraPermissionGranted || !snapshot.cameraReady) {
-            return
+    private fun performCameraSwitch() {
+        update {
+            it.copy(
+                cameraReady = false,
+                cameraSwitchInProgress = true,
+                captureState = CaptureState.PREPARING,
+            )
         }
-        if (pendingSegment != null || camera.isRecording() || exporter.isExporting()) {
-            return
+        if (!camera.switchCamera()) {
+            resumeAfterCameraSwitch = false
+            update {
+                it.copy(
+                    cameraReady = true,
+                    cameraSwitchInProgress = false,
+                    captureState = idleCaptureState(it.activeSession),
+                    errorMessage = getApplication<Application>().getString(R.string.camera_switch_unavailable),
+                )
+            }
         }
+    }
 
-        val session = repository.getOrCreateDraft(pressedAt)
+    private fun maybeStartQueuedSegment() {
+        val request = queuedSegmentStart ?: return
+        val snapshot = mutableState.value
+        if (!snapshot.volumeUpHeld || !cameraPermissionGranted || !snapshot.cameraReady ||
+            snapshot.cameraSwitchInProgress
+        ) {
+            return
+        }
+        if (pendingSegment != null || camera.isRecording() || exporter.isExporting()) return
+
+        val session = repository.getOrCreateDraft(
+            nowEpochMs = request.pressedAtEpochMs,
+            timestampOverlay = snapshot.timestampSettings,
+        )
         val pending = runCatching {
-            repository.createPendingSegment(session.id, pressedAt)
+            repository.createPendingSegment(
+                sessionId = session.id,
+                pressedAtEpochMs = request.pressedAtEpochMs,
+                createsMarker = request.createsMarker,
+            )
         }.getOrElse { error ->
+            queuedSegmentStart = null
             update {
                 it.copy(
                     captureState = CaptureState.ERROR,
@@ -297,7 +439,7 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         pendingSegment = pending
-        queuedPressEpochMs = null
+        queuedSegmentStart = null
         update {
             it.copy(
                 activeSession = session,
@@ -342,11 +484,10 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
 
-        val all = repository.loadAll()
         update {
             it.copy(
                 activeSession = active,
-                sessions = all,
+                sessions = repository.loadAll(),
                 currentSegmentDurationMs = 0L,
                 captureState = idleCaptureState(active),
                 errorMessage = userFacingError,
@@ -355,13 +496,18 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
 
         when {
             finishRequested -> exportActiveSession()
+            switchAfterSegmentFinalizes -> {
+                switchAfterSegmentFinalizes = false
+                performCameraSwitch()
+            }
             mutableState.value.volumeUpHeld -> {
-                queuedPressEpochMs = System.currentTimeMillis()
+                queuedSegmentStart = QueuedSegmentStart(
+                    pressedAtEpochMs = System.currentTimeMillis(),
+                    createsMarker = false,
+                )
                 maybeStartQueuedSegment()
             }
-            navigationToGalleryRequested -> {
-                update { it.copy(screen = MainScreen.GALLERY) }
-            }
+            navigationToGalleryRequested -> update { it.copy(screen = MainScreen.GALLERY) }
         }
     }
 
@@ -392,7 +538,7 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
-        val outputName = "setlog-${latest.id}.mp4"
+        val outputName = "vibe-${latest.id}.mp4"
         val exportingSession = repository.markExporting(latest.id, outputName)
         update {
             it.copy(
@@ -411,15 +557,14 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
             outputFile = repository.outputFile(exportingSession.id, outputName),
             callback = object : SessionExporter.Callback {
                 override fun onExportCompleted(sessionId: String, outputFile: File) {
-                    val ready = runCatching {
-                        repository.markReady(sessionId)
-                    }.getOrElse { error ->
-                        repository.markExportFailed(
-                            sessionId,
-                            error.localizedMessage ?: "Finished file validation failed.",
-                        )
-                        null
-                    }
+                    val ready = runCatching { repository.markReady(sessionId) }
+                        .getOrElse { error ->
+                            repository.markExportFailed(
+                                sessionId,
+                                error.localizedMessage ?: "Finished file validation failed.",
+                            )
+                            null
+                        }
                     finishRequested = false
                     navigationToGalleryRequested = true
                     val active = repository.getActiveDraft()
@@ -459,6 +604,62 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
+    private fun rebuildReadySession(sessionId: String) {
+        if (exporter.isExporting()) return
+        val session = repository.readSession(sessionId) ?: return
+        if (session.status != SessionStatus.READY || session.segments.isEmpty()) {
+            refresh()
+            return
+        }
+        val temporary = repository.outputFile(sessionId, "vibe-${session.id}.rebuild.mp4")
+        temporary.delete()
+        update {
+            it.copy(
+                captureState = CaptureState.EXPORTING,
+                sessions = repository.loadAll(),
+                selectedSessionId = session.id,
+                errorMessage = null,
+            )
+        }
+        exporter.export(
+            session = session,
+            outputFile = temporary,
+            callback = object : SessionExporter.Callback {
+                override fun onExportCompleted(sessionId: String, outputFile: File) {
+                    val result = runCatching {
+                        repository.installRebuiltOutput(
+                            sessionId = sessionId,
+                            temporaryFile = outputFile,
+                            outputFileName = "vibe-$sessionId.mp4",
+                        )
+                    }
+                    refresh()
+                    update {
+                        it.copy(
+                            screen = MainScreen.GALLERY,
+                            selectedSessionId = sessionId,
+                            captureState = idleCaptureState(it.activeSession),
+                            errorMessage = result.exceptionOrNull()?.localizedMessage,
+                        )
+                    }
+                }
+
+                override fun onExportFailed(sessionId: String, message: String) {
+                    temporary.delete()
+                    refresh()
+                    update {
+                        it.copy(
+                            screen = MainScreen.GALLERY,
+                            selectedSessionId = sessionId,
+                            captureState = idleCaptureState(it.activeSession),
+                            errorMessage = message,
+                        )
+                    }
+                }
+            },
+        )
+    }
+
     private fun refresh(activeOverride: VideoSession? = repository.getActiveDraft()) {
         update {
             it.copy(
@@ -476,14 +677,21 @@ class SetLogViewModel(application: Application) : AndroidViewModel(application) 
             activeSession = active,
             sessions = repository.loadAll(),
             showFirstGuide = !repository.firstGuideSeen(),
+            inputSettings = repository.loadInputSettings(),
+            timestampSettings = active?.timestampOverlay ?: repository.loadTimestampSettings(),
         )
     }
 
-    private fun idleCaptureState(active: VideoSession?): CaptureState = when {
+    private fun idleCaptureState(
+        active: VideoSession?,
+        cameraReady: Boolean = mutableState.value.cameraReady,
+    ): CaptureState = when {
         active?.status == SessionStatus.EXPORTING -> CaptureState.EXPORTING
-        mutableState.value.cameraReady -> CaptureState.READY
+        cameraReady -> CaptureState.READY
         else -> CaptureState.PREPARING
     }
+
+    private fun itIsSwitching(): Boolean = mutableState.value.cameraSwitchInProgress
 
     private inline fun update(transform: (SetLogUiState) -> SetLogUiState) {
         mutableState.value = transform(mutableState.value)

@@ -1,11 +1,307 @@
 import AVKit
 import SwiftUI
+import UniformTypeIdentifiers
 import UIKit
 
 private let sharedThumbnailGenerator = VideoThumbnailGenerator()
 
+// MARK: - Camera settings
+
+struct CameraControlSettingsSheet: View {
+    @ObservedObject var viewModel: CameraViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var inputSettings: InputSettings
+    @State private var timestampSettings: TimestampOverlaySettings
+
+    init(viewModel: CameraViewModel) {
+        self.viewModel = viewModel
+        _inputSettings = State(initialValue: viewModel.inputSettings)
+        _timestampSettings = State(initialValue: viewModel.timestampSettings)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Picker(String(localized: "settings.record-control"), selection: $inputSettings.recordControl) {
+                        ForEach(CaptureControl.allCases) { control in
+                            Label(controlTitle(control), systemImage: controlSymbol(control))
+                                .tag(control)
+                        }
+                    }
+
+                    Picker(String(localized: "settings.double-press"), selection: $inputSettings.doublePressAction) {
+                        ForEach(ShortcutAction.allCases) { action in
+                            Text(actionTitle(action)).tag(action)
+                        }
+                    }
+
+                    Picker(String(localized: "settings.triple-press"), selection: $inputSettings.triplePressAction) {
+                        ForEach(ShortcutAction.allCases) { action in
+                            Text(actionTitle(action)).tag(action)
+                        }
+                    }
+                } header: {
+                    Text(String(localized: "settings.hardware.header"))
+                } footer: {
+                    Text(String(localized: "settings.hardware.footer.ios"))
+                }
+
+                Section {
+                    TimestampOverlayEditor(settings: $timestampSettings)
+                } header: {
+                    Text(String(localized: "timestamp.header"))
+                } footer: {
+                    Text(String(localized: "timestamp.footer"))
+                }
+            }
+            .navigationTitle(String(localized: "camera.settings"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(String(localized: "common.cancel")) {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(String(localized: "common.done")) {
+                        viewModel.saveInputSettings(inputSettings)
+                        viewModel.saveTimestampDefaults(timestampSettings)
+                        dismiss()
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+        }
+        .presentationDetents([.large])
+    }
+
+    private func controlTitle(_ control: CaptureControl) -> String {
+        String(localized: control == .secondary ? "control.secondary" : "control.primary")
+    }
+
+    private func controlSymbol(_ control: CaptureControl) -> String {
+        control == .secondary ? "plus.circle.fill" : "minus.circle.fill"
+    }
+
+    private func actionTitle(_ action: ShortcutAction) -> String {
+        switch action {
+        case .finish:
+            String(localized: "shortcut.action.finish")
+        case .openGallery:
+            String(localized: "shortcut.action.gallery")
+        case .none:
+            String(localized: "shortcut.action.none")
+        }
+    }
+}
+
+struct TimestampOverlayEditor: View {
+    @Binding var settings: TimestampOverlaySettings
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Toggle(String(localized: "timestamp.enabled"), isOn: enabledBinding)
+
+            TimestampOverlayPreview(settings: $settings, interactive: settings.enabled)
+                .frame(height: 290)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(.secondary.opacity(0.28), lineWidth: 1)
+                )
+                .opacity(settings.enabled ? 1 : 0.45)
+
+            Text(String(localized: "timestamp.drag-hint"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Label(String(localized: "timestamp.size"), systemImage: "textformat.size")
+                Slider(
+                    value: Binding(
+                        get: { settings.scale },
+                        set: { settings.scale = $0 }
+                    ),
+                    in: 0.60...1.80
+                )
+                Text(String(format: "%.0f%%", settings.scale * 100))
+                    .font(.caption.monospacedDigit())
+                    .frame(width: 48, alignment: .trailing)
+            }
+            .disabled(!settings.enabled)
+
+            Picker(String(localized: "timestamp.style"), selection: $settings.style) {
+                Text(String(localized: "timestamp.style.clean")).tag(TimestampStyle.clean)
+                Text(String(localized: "timestamp.style.boxed")).tag(TimestampStyle.boxed)
+                Text(String(localized: "timestamp.style.monospaced")).tag(TimestampStyle.monospaced)
+            }
+            .pickerStyle(.segmented)
+            .disabled(!settings.enabled)
+
+            HStack(spacing: 8) {
+                PositionPresetButton(
+                    title: String(localized: "timestamp.position.top"),
+                    symbol: "rectangle.topthird.inset.filled",
+                    action: { setPosition(x: 0.5, y: 0.14) }
+                )
+                PositionPresetButton(
+                    title: String(localized: "timestamp.position.center"),
+                    symbol: "rectangle.center.inset.filled",
+                    action: { setPosition(x: 0.5, y: 0.5) }
+                )
+                PositionPresetButton(
+                    title: String(localized: "timestamp.position.bottom"),
+                    symbol: "rectangle.bottomthird.inset.filled",
+                    action: { setPosition(x: 0.5, y: 0.84) }
+                )
+            }
+            .disabled(!settings.enabled)
+        }
+    }
+
+    private var enabledBinding: Binding<Bool> {
+        Binding(
+            get: { settings.enabled },
+            set: { settings.enabled = $0 }
+        )
+    }
+
+    private func setPosition(x: Double, y: Double) {
+        settings.x = x
+        settings.y = y
+    }
+}
+
+struct TimestampOverlayPreview: View {
+    @Binding var settings: TimestampOverlaySettings
+    let interactive: Bool
+    @State private var dragOrigin: TimestampOverlaySettings?
+    @State private var magnifyOrigin: TimestampOverlaySettings?
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                LinearGradient(
+                    colors: [.black.opacity(0.92), .gray.opacity(0.42)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                GridGuide()
+                    .stroke(.white.opacity(0.12), lineWidth: 1)
+
+                if settings.enabled {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(DateFormatters.overlay.string(from: context.date))
+                            .font(timestampFont)
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .padding(.horizontal, settings.style == .boxed ? 10 : 3)
+                            .padding(.vertical, settings.style == .boxed ? 6 : 2)
+                            .background(
+                                settings.style == .boxed ? Color.black.opacity(0.68) : .clear,
+                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            )
+                            .shadow(color: .black.opacity(0.72), radius: settings.style == .clean ? 3 : 0)
+                            .scaleEffect(settings.scale)
+                            .position(
+                                x: proxy.size.width * settings.sanitized.x,
+                                y: proxy.size.height * settings.sanitized.y
+                            )
+                            .gesture(dragGesture(in: proxy.size))
+                            .simultaneousGesture(magnifyGesture)
+                            .accessibilityLabel(String(localized: "timestamp.preview"))
+                    }
+                } else {
+                    Label(String(localized: "timestamp.off"), systemImage: "eye.slash")
+                        .font(.headline)
+                        .foregroundStyle(.white.opacity(0.65))
+                }
+            }
+            .contentShape(Rectangle())
+        }
+    }
+
+    private var timestampFont: Font {
+        settings.style == .monospaced
+            ? .system(.body, design: .monospaced, weight: .semibold)
+            : .system(.body, design: .rounded, weight: .semibold)
+    }
+
+    private func dragGesture(in size: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                guard interactive else { return }
+                if dragOrigin == nil {
+                    dragOrigin = settings
+                }
+                guard let origin = dragOrigin else { return }
+                settings.x = origin.x + value.translation.width / max(size.width, 1)
+                settings.y = origin.y + value.translation.height / max(size.height, 1)
+                settings = settings.sanitized
+            }
+            .onEnded { _ in
+                dragOrigin = nil
+                settings = settings.sanitized
+            }
+    }
+
+    private var magnifyGesture: some Gesture {
+        MagnifyGesture()
+            .onChanged { value in
+                guard interactive else { return }
+                if magnifyOrigin == nil {
+                    magnifyOrigin = settings
+                }
+                guard let origin = magnifyOrigin else { return }
+                settings.scale = origin.scale * value.magnification
+                settings = settings.sanitized
+            }
+            .onEnded { _ in
+                magnifyOrigin = nil
+                settings = settings.sanitized
+            }
+    }
+}
+
+private struct PositionPresetButton: View {
+    let title: String
+    let symbol: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: symbol)
+                Text(title)
+                    .font(.caption2)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+        }
+        .buttonStyle(.bordered)
+    }
+}
+
+private struct GridGuide: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        for fraction in [1.0 / 3.0, 2.0 / 3.0] {
+            path.move(to: CGPoint(x: rect.width * fraction, y: 0))
+            path.addLine(to: CGPoint(x: rect.width * fraction, y: rect.height))
+            path.move(to: CGPoint(x: 0, y: rect.height * fraction))
+            path.addLine(to: CGPoint(x: rect.width, y: rect.height * fraction))
+        }
+        return path
+    }
+}
+
+// MARK: - Gallery
+
 struct GalleryScreen: View {
     @ObservedObject var viewModel: CameraViewModel
+    @State private var importPickerPresented = false
 
     private var resumableSessions: [SetLogSession] {
         viewModel.sessions.filter(\.isResumable)
@@ -19,11 +315,18 @@ struct GalleryScreen: View {
         NavigationStack {
             Group {
                 if viewModel.sessions.isEmpty {
-                    ContentUnavailableView(
-                        String(localized: "gallery.empty.title"),
-                        systemImage: "video.slash",
-                        description: Text(String(localized: "gallery.empty.message"))
-                    )
+                    ContentUnavailableView {
+                        Label(String(localized: "gallery.empty.title"), systemImage: "video.slash")
+                    } description: {
+                        Text(String(localized: "gallery.empty.message"))
+                    } actions: {
+                        Button {
+                            importPickerPresented = true
+                        } label: {
+                            Label(String(localized: "gallery.import"), systemImage: "square.and.arrow.down")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 22) {
@@ -52,7 +355,18 @@ struct GalleryScreen: View {
             .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle(String(localized: "gallery.title"))
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        importPickerPresented = true
+                    } label: {
+                        if viewModel.importInProgress {
+                            ProgressView()
+                        } else {
+                            Label(String(localized: "gallery.import"), systemImage: "square.and.arrow.down")
+                        }
+                    }
+                    .disabled(viewModel.importInProgress)
+
                     Button(action: viewModel.returnToCamera) {
                         Label(String(localized: "gallery.camera"), systemImage: "camera.fill")
                     }
@@ -63,6 +377,20 @@ struct GalleryScreen: View {
             }
             .sheet(item: $viewModel.selectedSession) { session in
                 SessionDetailSheet(viewModel: viewModel, session: session)
+            }
+            .fileImporter(
+                isPresented: $importPickerPresented,
+                allowedContentTypes: [.movie],
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    if let url = urls.first {
+                        viewModel.importVideo(url)
+                    }
+                case .failure(let error):
+                    viewModel.alertMessage = error.localizedDescription
+                }
             }
         }
     }
@@ -122,6 +450,9 @@ private struct SessionCard: View {
                     HStack(spacing: 12) {
                         Label(formatDuration(session.totalDurationSeconds), systemImage: "clock")
                         Label("\(session.markers.count)", systemImage: "bookmark.fill")
+                        if session.isImported {
+                            Label(String(localized: "gallery.imported"), systemImage: "square.and.arrow.down")
+                        }
                     }
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -204,6 +535,7 @@ private struct SessionDetailSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var title: String
     @State private var caption: String
+    @State private var timestampOverlay: TimestampOverlaySettings
     @State private var player: AVPlayer?
     @State private var deleteConfirmation = false
 
@@ -212,6 +544,11 @@ private struct SessionDetailSheet: View {
         self.session = session
         _title = State(initialValue: session.title)
         _caption = State(initialValue: session.caption)
+        _timestampOverlay = State(initialValue: session.effectiveTimestampOverlay)
+    }
+
+    private var isRebuilding: Bool {
+        viewModel.rebuildingSessionID == session.id
     }
 
     var body: some View {
@@ -252,9 +589,20 @@ private struct SessionDetailSheet: View {
                         Text(DateFormatters.display.string(from: session.createdAt))
                             .multilineTextAlignment(.trailing)
                     }
-                    Button(String(localized: "details.save-edits")) {
-                        saveEdits()
+                    if session.isImported {
+                        LabeledContent(String(localized: "gallery.imported")) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                        }
                     }
+                }
+
+                Section {
+                    TimestampOverlayEditor(settings: $timestampOverlay)
+                } header: {
+                    Text(String(localized: "timestamp.header"))
+                } footer: {
+                    Text(String(localized: "timestamp.gallery.footer"))
                 }
 
                 if let error = session.errorMessage, !error.isEmpty {
@@ -293,6 +641,28 @@ private struct SessionDetailSheet: View {
                 }
 
                 Section {
+                    Button {
+                        saveEdits()
+                    } label: {
+                        if isRebuilding {
+                            HStack {
+                                ProgressView()
+                                Text(String(localized: "details.rebuilding"))
+                            }
+                            .frame(maxWidth: .infinity)
+                        } else {
+                            Label(
+                                session.status == .ready
+                                    ? String(localized: "details.save-rebuild")
+                                    : String(localized: "details.save-edits"),
+                                systemImage: "checkmark.circle"
+                            )
+                            .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isRebuilding)
+
                     if session.isResumable {
                         Button {
                             saveEdits()
@@ -313,12 +683,12 @@ private struct SessionDetailSheet: View {
                         }
                     } else if session.status == .ready {
                         Button {
-                            saveEdits()
                             let updated = viewModel.sessions.first(where: { $0.id == session.id }) ?? session
                             viewModel.share(updated)
                         } label: {
                             Label(String(localized: "details.share"), systemImage: "square.and.arrow.up")
                         }
+                        .disabled(isRebuilding)
                     }
 
                     Button(role: .destructive) {
@@ -326,6 +696,7 @@ private struct SessionDetailSheet: View {
                     } label: {
                         Label(String(localized: "details.delete"), systemImage: "trash")
                     }
+                    .disabled(isRebuilding)
                 }
             }
             .navigationTitle(String(localized: "details.title-screen"))
@@ -333,14 +704,20 @@ private struct SessionDetailSheet: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(String(localized: "common.done")) {
-                        saveEdits()
-                        dismiss()
+                        if !isRebuilding {
+                            saveEdits()
+                            dismiss()
+                        }
                     }
+                    .disabled(isRebuilding)
                 }
             }
             .onAppear {
-                if let url = viewModel.previewURL(for: session) {
-                    player = AVPlayer(url: url)
+                reloadPlayer()
+            }
+            .onChange(of: viewModel.rebuildingSessionID) { oldValue, newValue in
+                if oldValue == session.id, newValue == nil {
+                    reloadPlayer()
                 }
             }
             .onDisappear {
@@ -361,10 +738,24 @@ private struct SessionDetailSheet: View {
             }
         }
         .presentationDetents([.large])
+        .interactiveDismissDisabled(isRebuilding)
     }
 
     private func saveEdits() {
-        viewModel.saveDetails(sessionID: session.id, title: title, caption: caption)
+        viewModel.saveDetailsAndOverlay(
+            sessionID: session.id,
+            title: title,
+            caption: caption,
+            timestampOverlay: timestampOverlay
+        )
+    }
+
+    private func reloadPlayer() {
+        player?.pause()
+        let current = viewModel.sessions.first(where: { $0.id == session.id }) ?? session
+        if let url = viewModel.previewURL(for: current) {
+            player = AVPlayer(url: url)
+        }
     }
 }
 

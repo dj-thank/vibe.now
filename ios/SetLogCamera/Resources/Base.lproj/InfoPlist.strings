@@ -1,3 +1,3 @@
-"CFBundleDisplayName" = "SetLog Camera";
-"NSCameraUsageDescription" = "SetLog Camera uses the camera to record video clips while you hold Volume Up.";
-"NSMicrophoneUsageDescription" = "SetLog Camera uses the microphone to include sound in recorded videos.";
+"CFBundleDisplayName" = "Vibe.now";
+"NSCameraUsageDescription" = "Vibe.now uses the camera to record video while you hold the configured physical capture control.";
+"NSMicrophoneUsageDescription" = "Vibe.now uses the microphone to include sound in recorded videos.";

@@ -1,23 +1,27 @@
 import Foundation
 
 enum CaptureInputTiming {
-    static let chordGraceNanoseconds: UInt64 = 90_000_000
-    static let finishHoldNanoseconds: UInt64 = 2_000_000_000
-    static let triplePressWindowSeconds: TimeInterval = 0.9
+    static let multiPressWindowSeconds: TimeInterval = 0.72
 }
 
-struct TriplePressDetector: Equatable, Sendable {
+struct MultiPressDetector: Equatable, Sendable {
     private(set) var pressTimes: [TimeInterval] = []
 
-    mutating func register(at timestamp: TimeInterval) -> Bool {
-        let lowerBound = timestamp - CaptureInputTiming.triplePressWindowSeconds
+    mutating func register(at timestamp: TimeInterval) -> Int {
+        let lowerBound = timestamp - CaptureInputTiming.multiPressWindowSeconds
         pressTimes.removeAll { $0 < lowerBound }
         pressTimes.append(timestamp)
         if pressTimes.count >= 3 {
             pressTimes.removeAll(keepingCapacity: true)
-            return true
+            return 3
         }
-        return false
+        return pressTimes.count
+    }
+
+    mutating func resolve() -> Int {
+        let count = pressTimes.count
+        pressTimes.removeAll(keepingCapacity: true)
+        return count
     }
 
     mutating func reset() {
@@ -28,11 +32,27 @@ struct TriplePressDetector: Equatable, Sendable {
 struct HardwarePressState: Equatable, Sendable {
     var primaryIsDown = false
     var secondaryIsDown = false
-    var finishHoldTriggered = false
+
+    func isDown(_ control: CaptureControl) -> Bool {
+        switch control {
+        case .primary:
+            primaryIsDown
+        case .secondary:
+            secondaryIsDown
+        }
+    }
+
+    mutating func setDown(_ isDown: Bool, for control: CaptureControl) {
+        switch control {
+        case .primary:
+            primaryIsDown = isDown
+        case .secondary:
+            secondaryIsDown = isDown
+        }
+    }
 
     mutating func reset() {
         primaryIsDown = false
         secondaryIsDown = false
-        finishHoldTriggered = false
     }
 }

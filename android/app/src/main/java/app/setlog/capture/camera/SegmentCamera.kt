@@ -124,21 +124,22 @@ class SegmentCamera(
         }
     }
 
-    fun switchCamera() {
+    fun switchCamera(): Boolean {
         if (activeRecording != null) {
-            return
+            return false
         }
-        val currentProvider = provider ?: return
+        val currentProvider = provider ?: return false
         val target = if (usingFrontCamera) {
             CameraSelector.DEFAULT_BACK_CAMERA
         } else {
             CameraSelector.DEFAULT_FRONT_CAMERA
         }
         if (!currentProvider.hasCamera(target)) {
-            return
+            return false
         }
         usingFrontCamera = !usingFrontCamera
         bind()
+        return true
     }
 
     fun isRecording(): Boolean = activeRecording != null

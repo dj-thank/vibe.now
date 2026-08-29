@@ -17,6 +17,11 @@ final class CameraViewModel: ObservableObject {
         case unavailable(String)
     }
 
+    private struct QueuedSegmentStart {
+        let pressedAt: Date
+        let createsMarker: Bool
+    }
+
     @Published var screen: AppScreen = .camera
     @Published private(set) var permissionState: PermissionState = .checking
     @Published private(set) var capturePhase: CapturePhase = .preparing
@@ -31,6 +36,11 @@ final class CameraViewModel: ObservableObject {
     @Published private(set) var currentHoldDuration: Double = 0
     @Published private(set) var zoomFactor: CGFloat = 1
     @Published private(set) var focusPoint: CGPoint?
+    @Published private(set) var cameraSwitchInProgress = false
+    @Published private(set) var importInProgress = false
+    @Published private(set) var rebuildingSessionID: UUID?
+    @Published private(set) var inputSettings: InputSettings
+    @Published private(set) var timestampSettings: TimestampOverlaySettings
 
     let engine = SegmentCaptureEngine()
 
@@ -38,27 +48,34 @@ final class CameraViewModel: ObservableObject {
     private lazy var exporter = SessionVideoExporter(store: store)
     private let orientationMonitor = DeviceOrientationMonitor()
     private var pendingSegment: PendingSegment?
+    private var queuedSegmentStart: QueuedSegmentStart?
     private var pressState = HardwarePressState()
-    private var triplePressDetector = TriplePressDetector()
-    private var recordStartTask: Task<Void, Never>?
-    private var finishHoldTask: Task<Void, Never>?
+    private var shortcutPressDetector = MultiPressDetector()
+    private var shortcutResolutionTask: Task<Void, Never>?
     private var elapsedTask: Task<Void, Never>?
     private var focusClearTask: Task<Void, Never>?
     private var pendingFinalize = false
     private var pendingGallery = false
     private var stopSessionAfterClip = false
+    private var switchAfterSegmentFinalizes = false
+    private var resumeAfterCameraSwitch = false
     private var configured = false
     private var appIsActive = true
     private var pinchStartZoom: CGFloat = 1
 
     init(store: SessionStore = SessionStore()) {
         self.store = store
+        inputSettings = store.loadInputSettings()
+        timestampSettings = store.loadTimestampSettings()
         bindEngine()
         orientationMonitor.onChange = { [weak self] orientation in
             self?.engine.updateRotation(for: orientation)
         }
         refreshSessions()
         activeSession = store.activeDraft()
+        if let activeSession {
+            timestampSettings = activeSession.effectiveTimestampOverlay
+        }
         guidePresented = store.shouldShowGuide
     }
 
@@ -75,12 +92,15 @@ final class CameraViewModel: ObservableObject {
     }
 
     var markerCount: Int {
-        (activeSession?.markers.count ?? 0) + (capturePhase == .recording ? 1 : 0)
+        (activeSession?.markers.count ?? 0) + ((pendingSegment?.createsMarker == true && capturePhase == .recording) ? 1 : 0)
     }
 
     var hasDraftContent: Bool {
         activeSession?.hasRecordedContent == true
     }
+
+    var recordControl: CaptureControl { inputSettings.recordControl }
+    var shortcutControl: CaptureControl { inputSettings.recordControl.opposite }
 
     func requestPermissionsAndStart() async {
         permissionState = .checking
@@ -105,9 +125,11 @@ final class CameraViewModel: ObservableObject {
         appIsActive = false
         cancelInputTasks()
         pressState.reset()
-        triplePressDetector.reset()
+        shortcutPressDetector.reset()
+        queuedSegmentStart = nil
+        resumeAfterCameraSwitch = false
         pendingGallery = false
-        if capturePhase == .recording {
+        if capturePhase == .recording || capturePhase == .preparing, pendingSegment != nil {
             stopSessionAfterClip = true
             stopCurrentSegment()
         } else if capturePhase == .savingClip {
@@ -123,72 +145,74 @@ final class CameraViewModel: ObservableObject {
         store.markGuideSeen()
     }
 
-    // MARK: Physical capture controls
+    // MARK: - Physical capture controls
 
-    func secondaryCaptureBegan() {
-        guard captureEventsEnabled, !pressState.secondaryIsDown else { return }
-        pressState.secondaryIsDown = true
-        recordStartTask?.cancel()
-        recordStartTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: CaptureInputTiming.chordGraceNanoseconds)
-            guard !Task.isCancelled, let self else { return }
-            guard self.pressState.secondaryIsDown, !self.pressState.primaryIsDown else { return }
-            self.beginSegmentIfPossible()
+    func captureControlBegan(_ control: CaptureControl) {
+        guard captureEventsEnabled, !pressState.isDown(control) else { return }
+        pressState.setDown(true, for: control)
+
+        if control == inputSettings.recordControl {
+            queuedSegmentStart = QueuedSegmentStart(pressedAt: Date(), createsMarker: true)
+            pendingGallery = false
+            maybeStartQueuedSegment()
         }
     }
 
-    func secondaryCaptureEnded(cancelled: Bool = false) {
-        guard pressState.secondaryIsDown else { return }
-        pressState.secondaryIsDown = false
-        recordStartTask?.cancel()
-        recordStartTask = nil
+    func captureControlEnded(_ control: CaptureControl, cancelled: Bool = false) {
+        guard pressState.isDown(control) else { return }
+        pressState.setDown(false, for: control)
 
-        if pressState.primaryIsDown {
-            finishHoldTask?.cancel()
-            finishHoldTask = nil
-        }
-        if capturePhase == .recording {
-            stopCurrentSegment()
-        }
-        if cancelled {
-            triplePressDetector.reset()
-        }
-    }
-
-    func primaryCaptureBegan() {
-        guard captureEventsEnabled, !pressState.primaryIsDown else { return }
-        pressState.primaryIsDown = true
-        pressState.finishHoldTriggered = false
-
-        let chordAtStart = pressState.secondaryIsDown
-        if chordAtStart {
-            recordStartTask?.cancel()
-            recordStartTask = nil
-            if capturePhase == .recording {
+        if control == inputSettings.recordControl {
+            queuedSegmentStart = nil
+            resumeAfterCameraSwitch = false
+            if capturePhase == .recording || (capturePhase == .preparing && pendingSegment != nil) {
                 stopCurrentSegment()
             }
+            if cancelled {
+                shortcutPressDetector.reset()
+            }
+            return
         }
-        scheduleFinishHold(requiresSecondary: chordAtStart)
+
+        guard !cancelled else {
+            cancelShortcutResolution()
+            shortcutPressDetector.reset()
+            return
+        }
+        registerShortcutPress()
     }
 
-    func primaryCaptureEnded(cancelled: Bool = false) {
-        guard pressState.primaryIsDown else { return }
-        pressState.primaryIsDown = false
-        finishHoldTask?.cancel()
-        finishHoldTask = nil
+    private func registerShortcutPress() {
+        let count = shortcutPressDetector.register(at: ProcessInfo.processInfo.systemUptime)
+        shortcutResolutionTask?.cancel()
 
-        if pressState.finishHoldTriggered {
-            pressState.finishHoldTriggered = false
-            triplePressDetector.reset()
-            return
-        }
-        guard !cancelled else {
-            triplePressDetector.reset()
+        if count >= 3 {
+            let resolved = shortcutPressDetector.resolve()
+            performShortcut(inputSettings.triplePressAction, count: resolved)
             return
         }
 
-        if triplePressDetector.register(at: ProcessInfo.processInfo.systemUptime) {
+        shortcutResolutionTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(CaptureInputTiming.multiPressWindowSeconds))
+            guard !Task.isCancelled, let self else { return }
+            let resolved = self.shortcutPressDetector.resolve()
+            if resolved == 2 {
+                self.performShortcut(self.inputSettings.doublePressAction, count: resolved)
+            }
+        }
+    }
+
+    private func performShortcut(_ action: ShortcutAction, count: Int) {
+        guard count >= 2 else { return }
+        switch action {
+        case .finish:
+            SetLogHaptics.finished()
+            finishCurrentSession()
+        case .openGallery:
+            SetLogHaptics.selection()
             openGalleryWithoutFinalizing()
+        case .none:
+            break
         }
     }
 
@@ -196,21 +220,52 @@ final class CameraViewModel: ObservableObject {
         finishCurrentSession()
     }
 
-    private func scheduleFinishHold(requiresSecondary: Bool) {
-        finishHoldTask?.cancel()
-        finishHoldTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: CaptureInputTiming.finishHoldNanoseconds)
-            guard !Task.isCancelled, let self, self.pressState.primaryIsDown else { return }
-            if requiresSecondary, !self.pressState.secondaryIsDown { return }
-            self.pressState.finishHoldTriggered = true
-            self.finishCurrentSession()
+    func saveInputSettings(_ settings: InputSettings) {
+        guard capturePhase != .recording, capturePhase != .preparing, capturePhase != .savingClip else {
+            alertMessage = String(localized: "settings.input.busy")
+            return
+        }
+        cancelShortcutResolution()
+        pressState.reset()
+        inputSettings = settings
+        store.saveInputSettings(settings)
+    }
+
+    func saveTimestampDefaults(_ settings: TimestampOverlaySettings) {
+        let sanitized = settings.sanitized
+        timestampSettings = sanitized
+        store.saveTimestampSettings(sanitized)
+        guard let activeSession else { return }
+        do {
+            self.activeSession = try store.updateTimestampOverlay(
+                sessionID: activeSession.id,
+                settings: sanitized
+            )
+            refreshSessions()
+        } catch {
+            fail(error)
         }
     }
 
-    // MARK: Camera operations
+    // MARK: - Camera operations
 
     func switchCamera() {
-        guard capturePhase == .ready, isSessionRunning else { return }
+        guard captureEventsEnabled, !cameraSwitchInProgress else { return }
+        cameraSwitchInProgress = true
+        resumeAfterCameraSwitch = pressState.isDown(inputSettings.recordControl)
+
+        if capturePhase == .recording || (capturePhase == .preparing && pendingSegment != nil) {
+            switchAfterSegmentFinalizes = true
+            stopCurrentSegment()
+        } else if capturePhase == .savingClip {
+            switchAfterSegmentFinalizes = true
+        } else {
+            performCameraSwitch()
+        }
+    }
+
+    private func performCameraSwitch() {
+        capturePhase = .preparing
         engine.switchCamera()
     }
 
@@ -238,13 +293,32 @@ final class CameraViewModel: ObservableObject {
         }
     }
 
-    private func beginSegmentIfPossible() {
-        guard screen == .camera, appIsActive, isSessionRunning else { return }
+    private func maybeStartQueuedSegment() {
+        guard let queuedSegmentStart else { return }
+        guard pressState.isDown(inputSettings.recordControl) else {
+            self.queuedSegmentStart = nil
+            return
+        }
+        guard !cameraSwitchInProgress, pendingSegment == nil else { return }
+        guard capturePhase == .ready || isFailure(capturePhase) else { return }
+        self.queuedSegmentStart = nil
+        beginSegmentIfPossible(
+            pressedAt: queuedSegmentStart.pressedAt,
+            createsMarker: queuedSegmentStart.createsMarker
+        )
+    }
+
+    private func beginSegmentIfPossible(pressedAt: Date, createsMarker: Bool) {
+        guard screen == .camera, appIsActive, isSessionRunning, !cameraSwitchInProgress else { return }
         switch capturePhase {
         case .ready, .failed:
             do {
-                let session = try store.getOrCreateDraft()
-                let pending = try store.reserveSegment(sessionID: session.id, pressedAt: Date())
+                let session = try store.getOrCreateDraft(timestampOverlay: timestampSettings)
+                let pending = try store.reserveSegment(
+                    sessionID: session.id,
+                    pressedAt: pressedAt,
+                    createsMarker: createsMarker
+                )
                 activeSession = session
                 pendingSegment = pending
                 capturePhase = .preparing
@@ -253,11 +327,7 @@ final class CameraViewModel: ObservableObject {
             } catch {
                 fail(error)
             }
-        case .savingClip:
-            // The engine will immediately start the next clip after the previous file closes,
-            // provided Volume Up is still physically held.
-            break
-        case .preparing, .recording, .exporting:
+        case .savingClip, .preparing, .recording, .exporting:
             break
         }
     }
@@ -279,9 +349,12 @@ final class CameraViewModel: ObservableObject {
 
         pendingFinalize = true
         pendingGallery = false
-        recordStartTask?.cancel()
-        recordStartTask = nil
-        if capturePhase == .recording || capturePhase == .preparing {
+        queuedSegmentStart = nil
+        resumeAfterCameraSwitch = false
+        switchAfterSegmentFinalizes = false
+        cameraSwitchInProgress = false
+        cancelShortcutResolution()
+        if capturePhase == .recording || (capturePhase == .preparing && pendingSegment != nil) {
             stopCurrentSegment()
         } else if capturePhase != .savingClip {
             exportActiveSession()
@@ -313,6 +386,7 @@ final class CameraViewModel: ObservableObject {
                     self.refreshSessions()
                     self.selectedSession = ready
                     self.screen = .gallery
+                    self.pressState.reset()
                     SetLogHaptics.finished()
                 } catch {
                     let failed = try? self.store.markExportFailed(
@@ -335,11 +409,16 @@ final class CameraViewModel: ObservableObject {
         }
     }
 
-    // MARK: Navigation and gallery
+    // MARK: - Navigation and gallery
 
     func openGalleryWithoutFinalizing() {
         pendingGallery = true
-        if capturePhase == .recording || capturePhase == .preparing {
+        pendingFinalize = false
+        queuedSegmentStart = nil
+        resumeAfterCameraSwitch = false
+        switchAfterSegmentFinalizes = false
+        cameraSwitchInProgress = false
+        if capturePhase == .recording || (capturePhase == .preparing && pendingSegment != nil) {
             stopCurrentSegment()
             return
         }
@@ -354,6 +433,11 @@ final class CameraViewModel: ObservableObject {
         sharePayload = nil
         screen = .camera
         activeSession = store.activeDraft()
+        if let activeSession {
+            timestampSettings = activeSession.effectiveTimestampOverlay
+        } else {
+            timestampSettings = store.loadTimestampSettings()
+        }
         capturePhase = .ready
         if appIsActive {
             engine.startSession()
@@ -372,6 +456,7 @@ final class CameraViewModel: ObservableObject {
     func resume(_ session: SetLogSession) {
         do {
             activeSession = try store.resume(sessionID: session.id)
+            timestampSettings = activeSession?.effectiveTimestampOverlay ?? store.loadTimestampSettings()
             refreshSessions()
             returnToCamera()
         } catch {
@@ -379,16 +464,87 @@ final class CameraViewModel: ObservableObject {
         }
     }
 
-    func saveDetails(sessionID: UUID, title: String, caption: String) {
+    func saveDetailsAndOverlay(
+        sessionID: UUID,
+        title: String,
+        caption: String,
+        timestampOverlay: TimestampOverlaySettings
+    ) {
+        guard rebuildingSessionID == nil else { return }
         do {
-            let updated = try store.updateDetails(sessionID: sessionID, title: title, caption: caption)
+            var updated = try store.updateDetails(sessionID: sessionID, title: title, caption: caption)
+            updated = try store.updateTimestampOverlay(
+                sessionID: sessionID,
+                settings: timestampOverlay
+            )
             refreshSessions()
             selectedSession = updated
             if activeSession?.id == updated.id {
                 activeSession = updated
+                timestampSettings = updated.effectiveTimestampOverlay
             }
+
+            guard updated.status == .ready else { return }
+            rebuildReadySession(updated)
         } catch {
             fail(error)
+        }
+    }
+
+    private func rebuildReadySession(_ session: SetLogSession) {
+        rebuildingSessionID = session.id
+        Task { [weak self] in
+            guard let self else { return }
+            let temporaryURL = self.store.temporaryRebuildURL(sessionID: session.id)
+            do {
+                let output = try await self.exporter.export(session, to: temporaryURL)
+                let ready = try self.store.installRebuiltOutput(
+                    sessionID: session.id,
+                    temporaryURL: output,
+                    outputFileName: "vibe-\(session.id.uuidString).mp4"
+                )
+                self.rebuildingSessionID = nil
+                self.refreshSessions()
+                self.selectedSession = ready
+                SetLogHaptics.selection()
+            } catch {
+                try? FileManager.default.removeItem(at: temporaryURL)
+                self.rebuildingSessionID = nil
+                self.alertMessage = error.localizedDescription
+                self.refreshSessions()
+                SetLogHaptics.warning()
+            }
+        }
+    }
+
+    func importVideo(_ sourceURL: URL) {
+        guard !importInProgress else { return }
+        importInProgress = true
+        Task { [weak self] in
+            guard let self else { return }
+            let didAccess = sourceURL.startAccessingSecurityScopedResource()
+            defer {
+                if didAccess {
+                    sourceURL.stopAccessingSecurityScopedResource()
+                }
+            }
+            do {
+                let asset = AVURLAsset(url: sourceURL)
+                let duration = try await asset.load(.duration)
+                let seconds = duration.isNumeric ? max(0.001, CMTimeGetSeconds(duration)) : 0.001
+                let imported = try self.store.importVideo(
+                    from: sourceURL,
+                    durationSeconds: seconds
+                )
+                self.importInProgress = false
+                self.refreshSessions()
+                self.selectedSession = imported
+                SetLogHaptics.selection()
+            } catch {
+                self.importInProgress = false
+                self.alertMessage = error.localizedDescription
+                SetLogHaptics.warning()
+            }
         }
     }
 
@@ -406,7 +562,7 @@ final class CameraViewModel: ObservableObject {
         do {
             let videoURL = try store.makeShareCopy(for: session)
             let metadataURL = videoURL.deletingLastPathComponent()
-                .appending(path: "\(sanitizedFileStem(session.title))-setlog.json")
+                .appending(path: "\(sanitizedFileStem(session.title))-vibenow.json")
             let items: [Any] = FileManager.default.fileExists(atPath: metadataURL.path)
                 ? [videoURL, metadataURL]
                 : [videoURL]
@@ -435,7 +591,7 @@ final class CameraViewModel: ObservableObject {
         store.previewURL(for: session)
     }
 
-    // MARK: Engine callbacks
+    // MARK: - Engine callbacks
 
     private func bindEngine() {
         engine.onConfigured = { [weak self] result in
@@ -454,11 +610,19 @@ final class CameraViewModel: ObservableObject {
             }
         }
         engine.onSessionRunningChanged = { [weak self] running in
-            self?.isSessionRunning = running
+            guard let self else { return }
+            self.isSessionRunning = running
+            if running {
+                self.maybeStartQueuedSegment()
+            }
         }
         engine.onRecordingStarted = { [weak self] _ in
             guard let self else { return }
-            if !self.pressState.secondaryIsDown || self.pendingFinalize || self.pendingGallery {
+            if !self.pressState.isDown(self.inputSettings.recordControl)
+                || self.pendingFinalize
+                || self.pendingGallery
+                || self.cameraSwitchInProgress
+            {
                 self.capturePhase = .savingClip
                 self.engine.stopSegment()
                 return
@@ -474,6 +638,31 @@ final class CameraViewModel: ObservableObject {
             self?.cameraPosition = position
             self?.zoomFactor = 1
         }
+        engine.onCameraSwitchFinished = { [weak self] result in
+            guard let self else { return }
+            self.cameraSwitchInProgress = false
+            switch result {
+            case .success:
+                self.capturePhase = self.idleCapturePhase()
+            case .failure(let error):
+                self.capturePhase = self.idleCapturePhase()
+                self.alertMessage = error.localizedDescription
+                SetLogHaptics.warning()
+            }
+
+            let shouldResumeContinuation = self.resumeAfterCameraSwitch
+                && self.pressState.isDown(self.inputSettings.recordControl)
+                && !self.pendingFinalize
+                && !self.pendingGallery
+            self.resumeAfterCameraSwitch = false
+            if shouldResumeContinuation, self.queuedSegmentStart == nil {
+                self.queuedSegmentStart = QueuedSegmentStart(
+                    pressedAt: Date(),
+                    createsMarker: false
+                )
+            }
+            self.maybeStartQueuedSegment()
+        }
         engine.onInterrupted = { [weak self] message in
             guard let self else { return }
             self.alertMessage = message
@@ -486,7 +675,7 @@ final class CameraViewModel: ObservableObject {
     private func handleRecordingFinished(_ result: Result<RecordedSegmentResult, Error>) {
         stopElapsedTimer()
         guard let pending = pendingSegment else {
-            capturePhase = .ready
+            capturePhase = idleCapturePhase()
             return
         }
         pendingSegment = nil
@@ -515,15 +704,24 @@ final class CameraViewModel: ObservableObject {
         }
         if pendingFinalize {
             exportActiveSession()
-        } else if pendingGallery {
+            return
+        }
+        if pendingGallery {
             completeGalleryNavigation()
-        } else if pressState.secondaryIsDown, appIsActive, screen == .camera {
-            capturePhase = .ready
-            beginSegmentIfPossible()
-        } else if case .failed = capturePhase {
-            // Preserve the visible failure state.
-        } else {
-            capturePhase = .ready
+            return
+        }
+        if switchAfterSegmentFinalizes {
+            switchAfterSegmentFinalizes = false
+            performCameraSwitch()
+            return
+        }
+
+        capturePhase = idleCapturePhase()
+        if pressState.isDown(inputSettings.recordControl), appIsActive, screen == .camera {
+            if queuedSegmentStart == nil {
+                queuedSegmentStart = QueuedSegmentStart(pressedAt: Date(), createsMarker: false)
+            }
+            maybeStartQueuedSegment()
         }
     }
 
@@ -561,11 +759,27 @@ final class CameraViewModel: ObservableObject {
         currentHoldDuration = 0
     }
 
+    private func cancelShortcutResolution() {
+        shortcutResolutionTask?.cancel()
+        shortcutResolutionTask = nil
+    }
+
     private func cancelInputTasks() {
-        recordStartTask?.cancel()
-        recordStartTask = nil
-        finishHoldTask?.cancel()
-        finishHoldTask = nil
+        cancelShortcutResolution()
+        shortcutPressDetector.reset()
+        queuedSegmentStart = nil
+    }
+
+    private func idleCapturePhase() -> CapturePhase {
+        if case .failed = capturePhase {
+            return capturePhase
+        }
+        return .ready
+    }
+
+    private func isFailure(_ phase: CapturePhase) -> Bool {
+        if case .failed = phase { return true }
+        return false
     }
 
     private func fail(_ error: Error) {
