@@ -26,126 +26,23 @@ jobs:
           set -euo pipefail
           FEATURE_BRANCH="feat/vibe-now-controls-overlay-v0.2"
           EXPECTED_HEAD="cc0d5c242f566018d42fcb0b8502f7cc3d1af7e2"
+          PATCH="build-inputs/v0.2/compiler-fixes.patch"
 
+          echo "40b1c100061b75b1d3edb334c581223297a1c592f23e9f7716c9a974ecbd3ad3  ${PATCH}" | sha256sum --check --strict
           git fetch origin "refs/heads/${FEATURE_BRANCH}"
           ACTUAL_HEAD="$(git rev-parse FETCH_HEAD)"
           test "$ACTUAL_HEAD" = "$EXPECTED_HEAD"
           git checkout --detach "$ACTUAL_HEAD"
 
-          python3 - <<'PY'
-          from pathlib import Path
-
-          view_model = Path('android/app/src/main/java/app/setlog/capture/SetLogViewModel.kt')
-          source = view_model.read_text()
-          old_callback = '''                    update { it.copy(captureState = CaptureState.FINALIZING_SEGMENT) }
-                    camera.stopSegment()
-                    return
-'''
-          new_callback = '''                    update { it.copy(captureState = CaptureState.FINALIZING_SEGMENT) }
-                    stopSegmentAfterUnexpectedStart()
-                    return
-'''
-          if source.count(old_callback) != 1:
-              raise SystemExit('unexpected Android callback pattern count')
-          source = source.replace(old_callback, new_callback, 1)
-          exporter_line = '    private val exporter = SessionExporter(application, repository)\n\n'
-          helper = '''    private val exporter = SessionExporter(application, repository)
-
-    private fun stopSegmentAfterUnexpectedStart() {
-        camera.stopSegment()
-    }
-
-'''
-          if source.count(exporter_line) != 1:
-              raise SystemExit('unexpected Android exporter pattern count')
-          source = source.replace(exporter_line, helper, 1)
-          view_model.write_text(source)
-
-          camera_screen = Path('ios/SetLogCamera/UI/CameraScreen.swift')
-          source = camera_screen.read_text()
-          old = '''    private var label: String {
-        if switching { return String(localized: "status.switching") }
-        switch phase {
-        case .recording:
-            String(localized: "status.recording")
-        case .savingClip:
-            String(localized: "status.paused")
-        case .exporting:
-            String(localized: "status.saving")
-        case .failed:
-            String(localized: "status.problem")
-        case .preparing:
-            String(localized: "status.preparing")
-        case .ready:
-            isRunning ? String(localized: "status.ready") : String(localized: "status.camera-wait")
-        }
-    }
-
-    private var dotColor: Color {
-        if switching { return .cyan }
-        switch phase {
-        case .recording:
-            .red
-        case .savingClip:
-            .yellow
-        case .failed:
-            .orange
-        case .exporting, .preparing:
-            .blue
-        case .ready:
-            isRunning ? .green : .gray
-        }
-    }
-'''
-          new = '''    private var label: String {
-        if switching { return String(localized: "status.switching") }
-        switch phase {
-        case .recording:
-            return String(localized: "status.recording")
-        case .savingClip:
-            return String(localized: "status.paused")
-        case .exporting:
-            return String(localized: "status.saving")
-        case .failed:
-            return String(localized: "status.problem")
-        case .preparing:
-            return String(localized: "status.preparing")
-        case .ready:
-            return isRunning
-                ? String(localized: "status.ready")
-                : String(localized: "status.camera-wait")
-        }
-    }
-
-    private var dotColor: Color {
-        if switching { return .cyan }
-        switch phase {
-        case .recording:
-            return .red
-        case .savingClip:
-            return .yellow
-        case .failed:
-            return .orange
-        case .exporting, .preparing:
-            return .blue
-        case .ready:
-            return isRunning ? .green : .gray
-        }
-    }
-'''
-          if source.count(old) != 1:
-              raise SystemExit('unexpected iOS status block pattern count')
-          camera_screen.write_text(source.replace(old, new, 1))
-          PY
-
-          grep -q 'stopSegmentAfterUnexpectedStart()' android/app/src/main/java/app/setlog/capture/SetLogViewModel.kt
-          grep -q 'return Color' ios/SetLogCamera/UI/CameraScreen.swift || grep -q 'return \.red' ios/SetLogCamera/UI/CameraScreen.swift
+          git apply --check --whitespace=error-all "$PATCH"
+          git apply --index --whitespace=error-all "$PATCH"
           git diff --check
-          test "$(git diff --name-only | wc -l | tr -d ' ')" -eq 2
+          test "$(git diff --cached --name-only | wc -l | tr -d ' ')" -eq 2
+          grep -q 'stopSegmentAfterUnexpectedStart()' android/app/src/main/java/app/setlog/capture/SetLogViewModel.kt
+          grep -q 'return isRunning ? .green : .gray' ios/SetLogCamera/UI/CameraScreen.swift
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add android/app/src/main/java/app/setlog/capture/SetLogViewModel.kt ios/SetLogCamera/UI/CameraScreen.swift
           git commit -m "fix: resolve Android listener initialization and iOS status typing"
           git push \
             --force-with-lease="refs/heads/${FEATURE_BRANCH}:${EXPECTED_HEAD}" \
