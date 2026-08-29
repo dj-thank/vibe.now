@@ -1,0 +1,30 @@
+name: Archive source once
+
+on:
+  push:
+    branches:
+      - tmp/source-archive-v0.2f
+    paths:
+      - .github/workflows/archive-source-once.yml
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pack repository source
+        shell: bash
+        run: |
+          tar --exclude=.git -cJf /tmp/vibe-now-source.tar.xz .
+          sha256sum /tmp/vibe-now-source.tar.xz > /tmp/vibe-now-source.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vibe-now-source
+          path: |
+            /tmp/vibe-now-source.tar.xz
+            /tmp/vibe-now-source.sha256
+          if-no-files-found: error
+          retention-days: 1
