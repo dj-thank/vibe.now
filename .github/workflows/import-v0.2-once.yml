@@ -67,7 +67,10 @@ jobs:
 
           git fetch origin "refs/heads/${FEATURE_BRANCH}"
           ACTUAL_BASE="$(git rev-parse FETCH_HEAD)"
-          test "$ACTUAL_BASE" = "$EXPECTED_BASE"
+          if [ "$ACTUAL_BASE" != "$EXPECTED_BASE" ]; then
+            echo "Feature branch moved: expected $EXPECTED_BASE, got $ACTUAL_BASE" >&2
+            exit 1
+          fi
           git checkout --detach "$ACTUAL_BASE"
 
           git apply \
@@ -76,17 +79,10 @@ jobs:
             --exclude=.github/workflows/archive-source-once.yml \
             /tmp/vibenow-v0.2.patch
 
-          test "$(git diff --cached --name-only | wc -l)" -eq 42
-          grep -q '<string name="app_name">Vibe.now</string>' android/app/src/main/res/values/strings.xml
-          grep -q '<string name="app_name">Vibe.now</string>' android/app/src/main/res/values-ja/strings.xml
-          grep -q '<string>Vibe.now</string>' ios/SetLogCamera/Resources/Info.plist
-          grep -q 'versionName = "0.2.0"' android/app/build.gradle.kts
-          grep -q 'MARKETING_VERSION = 0.2.0' ios/SetLogCamera.xcodeproj/project.pbxproj
-
-          if grep -R -E 'VolumeChord|bothVolumeKeys|chordDetector' android/app/src/main ios/SetLogCamera; then
-            echo "Legacy simultaneous-volume shortcut remains" >&2
-            exit 1
-          fi
+          CHANGED_COUNT="$(git diff --cached --name-only | wc -l | tr -d ' ')"
+          echo "Changed files: $CHANGED_COUNT"
+          git diff --cached --name-status
+          test "$CHANGED_COUNT" -eq 42
 
           python3 - <<'PY'
           from pathlib import Path
@@ -94,14 +90,35 @@ jobs:
           import xml.etree.ElementTree as ET
 
           for path in Path('android/app/src/main/res').glob('values*/strings.xml'):
-              ET.parse(path)
-          for path in (
-              Path('ios/SetLogCamera/Resources/Info.plist'),
-              Path('ios/SetLogCamera/Resources/PrivacyInfo.xcprivacy'),
-          ):
-              with path.open('rb') as handle:
-                  plistlib.load(handle)
+              root = ET.parse(path).getroot()
+              strings = {
+                  element.attrib['name']: element.text or ''
+                  for element in root.findall('string')
+              }
+              assert strings.get('app_name') == 'Vibe.now', (path, strings.get('app_name'))
+
+          info_path = Path('ios/SetLogCamera/Resources/Info.plist')
+          with info_path.open('rb') as handle:
+              info = plistlib.load(handle)
+          assert info.get('CFBundleDisplayName') == 'Vibe.now', info.get('CFBundleDisplayName')
+
+          privacy_path = Path('ios/SetLogCamera/Resources/PrivacyInfo.xcprivacy')
+          with privacy_path.open('rb') as handle:
+              plistlib.load(handle)
+
+          android_gradle = Path('android/app/build.gradle.kts').read_text()
+          assert 'versionCode = 2' in android_gradle
+          assert 'versionName = "0.2.0"' in android_gradle
+
+          project = Path('ios/SetLogCamera.xcodeproj/project.pbxproj').read_text()
+          assert 'CURRENT_PROJECT_VERSION = "2";' in project
+          assert 'MARKETING_VERSION = "0.2.0";' in project
           PY
+
+          if grep -R -E 'VolumeChord|bothVolumeKeys|chordDetector' android/app/src/main ios/SetLogCamera; then
+            echo "Legacy simultaneous-volume shortcut remains" >&2
+            exit 1
+          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
