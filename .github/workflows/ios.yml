@@ -1,0 +1,41 @@
+name: iOS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
+  pull_request:
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Xcode version
+        run: xcodebuild -version
+      - name: Validate metadata
+        run: |
+          plutil -lint ios/SetLogCamera/Resources/Info.plist
+          plutil -lint ios/SetLogCamera/Resources/PrivacyInfo.xcprivacy
+          plutil -lint ios/SetLogCamera.xcodeproj/project.pbxproj
+      - name: Build for simulator
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -workspace SetLogCamera.xcworkspace \
+            -scheme SetLogCamera \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath /tmp/setlog-derived \
+            CODE_SIGNING_ALLOWED=NO \
+            build-for-testing
