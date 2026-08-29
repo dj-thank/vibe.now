@@ -1,0 +1,71 @@
+--- a/android/app/src/main/java/app/setlog/capture/SetLogViewModel.kt
++++ b/android/app/src/main/java/app/setlog/capture/SetLogViewModel.kt
+@@ -89,7 +89,7 @@
+                     snapshot.cameraSwitchInProgress
+                 ) {
+                     update { it.copy(captureState = CaptureState.FINALIZING_SEGMENT) }
+-                    camera.stopSegment()
++                    stopSegmentAfterUnexpectedStart()
+                     return
+                 }
+                 update {
+@@ -117,6 +117,10 @@
+ 
+     private val exporter = SessionExporter(application, repository)
+ 
++    private fun stopSegmentAfterUnexpectedStart() {
++        camera.stopSegment()
++    }
++
+     fun setPermissions(cameraGranted: Boolean, microphoneGranted: Boolean) {
+         cameraPermissionGranted = cameraGranted
+         microphonePermissionGranted = microphoneGranted
+--- a/ios/SetLogCamera/UI/CameraScreen.swift
++++ b/ios/SetLogCamera/UI/CameraScreen.swift
+@@ -400,17 +400,19 @@
+         if switching { return String(localized: "status.switching") }
+         switch phase {
+         case .recording:
+-            String(localized: "status.recording")
++            return String(localized: "status.recording")
+         case .savingClip:
+-            String(localized: "status.paused")
++            return String(localized: "status.paused")
+         case .exporting:
+-            String(localized: "status.saving")
++            return String(localized: "status.saving")
+         case .failed:
+-            String(localized: "status.problem")
++            return String(localized: "status.problem")
+         case .preparing:
+-            String(localized: "status.preparing")
++            return String(localized: "status.preparing")
+         case .ready:
+-            isRunning ? String(localized: "status.ready") : String(localized: "status.camera-wait")
++            return isRunning
++                ? String(localized: "status.ready")
++                : String(localized: "status.camera-wait")
+         }
+     }
+ 
+@@ -418,15 +420,15 @@
+         if switching { return .cyan }
+         switch phase {
+         case .recording:
+-            .red
++            return .red
+         case .savingClip:
+-            .yellow
++            return .yellow
+         case .failed:
+-            .orange
++            return .orange
+         case .exporting, .preparing:
+-            .blue
++            return .blue
+         case .ready:
+-            isRunning ? .green : .gray
++            return isRunning ? .green : .gray
+         }
+     }
+ }
