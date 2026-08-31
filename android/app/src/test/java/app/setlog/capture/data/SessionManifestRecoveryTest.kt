@@ -169,6 +169,86 @@ class SessionManifestRecoveryTest {
         assertEquals("empty normal save", SessionRepository(context).readSession(draft.id)?.title)
     }
 
+    @Test fun outputGuardFailedAliasCannotDeleteTheCommittedClipWhenResumed() {
+        val fixture = seedFixture()
+        val temporary = leaveLegacyInterruptedSave(fixture)
+        val json = JSONObject(temporary.readText(Charsets.UTF_8))
+        json.put("status", "FAILED")
+        json.put("outputFileName", fixture.saved.segments.single().fileName)
+        temporary.writeText(json.toString(), Charsets.UTF_8)
+
+        val reopened = SessionRepository(fixture.context)
+        val adopted = reopened.readSession(fixture.saved.id)
+        if (adopted != null) reopened.markDraftResumable(fixture.saved.id)
+
+        assertTrue("Recovery followed by resume must not delete the committed source clip", fixture.clip.isFile)
+        assertEquals(SYNTHETIC_CLIP, fixture.clip.readText(Charsets.UTF_8))
+        assertNull("A temporary output/source alias must not be promoted", adopted)
+    }
+
+    @Test fun outputGuardRejectsSourceAliasesInEverySessionStatus() {
+        val adoptedStatuses = mutableListOf<String>()
+        for (status in listOf("DRAFT", "FAILED", "READY", "EXPORTING")) {
+            val fixture = seedFixture()
+            val temporary = leaveLegacyInterruptedSave(fixture)
+            val json = JSONObject(temporary.readText(Charsets.UTF_8))
+            json.put("status", status)
+            json.put("outputFileName", fixture.saved.segments.single().fileName)
+            temporary.writeText(json.toString(), Charsets.UTF_8)
+            if (SessionRepository(fixture.context).readSession(fixture.saved.id) != null) adoptedStatuses += status
+            assertEquals(SYNTHETIC_CLIP, fixture.clip.readText(Charsets.UTF_8))
+        }
+        assertEquals("No status may admit an output that aliases a source clip", emptyList<String>(), adoptedStatuses)
+    }
+
+    @Test fun outputGuardRejectsReadyWithAnEmptyCompletedOutput() {
+        val fixture = seedFixture()
+        val temporary = leaveLegacyInterruptedSave(fixture)
+        val output = File(fixture.manifest.parentFile, "empty-completed-output.mp4")
+        output.writeBytes(byteArrayOf())
+        val json = JSONObject(temporary.readText(Charsets.UTF_8))
+        json.put("status", "READY")
+        json.put("outputFileName", output.name)
+        temporary.writeText(json.toString(), Charsets.UTF_8)
+
+        assertNotPromoted(fixture)
+        assertTrue(output.isFile)
+        assertEquals(0L, output.length())
+    }
+
+    @Test fun outputGuardAllowsNormalReadyAndInterruptedExportRecovery() {
+        for (mode in listOf("READY", "EXPORTING", "EXPORTING_EMPTY", "EXPORTING_MISSING")) {
+            val ready = mode == "READY"
+            val fixture = seedFixture()
+            val outputName = "distinct-completed-output.mp4"
+            fixture.repository.markExporting(fixture.saved.id, outputName)
+            val output = fixture.repository.outputFile(fixture.saved.id, outputName)
+            when (mode) {
+                "EXPORTING_MISSING" -> Unit
+                "EXPORTING_EMPTY" -> output.writeBytes(byteArrayOf())
+                else -> output.writeText("synthetic output bytes, not a real video", Charsets.UTF_8)
+            }
+            if (ready) fixture.repository.markReady(fixture.saved.id)
+            leaveLegacyInterruptedSave(fixture)
+
+            val reopened = SessionRepository(fixture.context)
+            val recovered = requireNotNull(reopened.readSession(fixture.saved.id))
+            assertEquals(fixture.saved.segments, recovered.segments)
+            assertEquals(fixture.saved.markers, recovered.markers)
+            assertEquals(SYNTHETIC_CLIP, fixture.clip.readText(Charsets.UTF_8))
+            if (ready) {
+                assertEquals("READY", recovered.status.name)
+                assertEquals(outputName, recovered.outputFileName)
+                assertTrue(output.length() > 0L)
+            } else {
+                assertEquals("FAILED", recovered.status.name)
+                assertNull(recovered.outputFileName)
+                reopened.markDraftResumable(fixture.saved.id)
+                assertEquals(SYNTHETIC_CLIP, fixture.clip.readText(Charsets.UTF_8))
+            }
+        }
+    }
+
     private fun assertNotPromoted(fixture: Fixture) {
         val reopened = SessionRepository(fixture.context)
         assertNull(reopened.readSession(fixture.saved.id))

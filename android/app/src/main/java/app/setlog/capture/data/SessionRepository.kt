@@ -508,11 +508,11 @@ class SessionRepository(context: Context) {
             require(recovered.markers.all { it.segmentId in segmentIds })
             recovered.outputFileName?.let { output ->
                 require(isLocalSessionFileName(output))
-                // Existing interrupted-export cleanup must never delete a committed source clip.
-                require(recovered.status != SessionStatus.EXPORTING || recovered.segments.none { it.fileName == output })
+                // Neither interrupted-export cleanup nor a later resume may delete a source clip.
+                require(recovered.segments.none { it.fileName == output })
             }
             require(recovered.status != SessionStatus.READY ||
-                recovered.outputFileName?.let { File(directory, it).isFile } == true)
+                recovered.outputFileName?.let { File(directory, it).run { isFile && length() > 0L } } == true)
             replaceManifest(temporary, manifest)
             recovered
         }.getOrNull()
