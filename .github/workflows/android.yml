@@ -35,7 +35,7 @@ jobs:
           gradle-version: "9.5.0"
       - name: Build debug APK
         working-directory: android
-        run: gradle --no-daemon --stacktrace assembleDebug
+        run: gradle --no-daemon --stacktrace testDebugUnitTest assembleDebug
       - name: Verify APK
         shell: bash
         run: |
