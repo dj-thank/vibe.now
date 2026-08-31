@@ -89,6 +89,7 @@ dependencies {
     implementation(libs.androidx.media3.effect)
 
     testImplementation(libs.junit)
+    testImplementation("org.robolectric:robolectric:4.16")
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 }
