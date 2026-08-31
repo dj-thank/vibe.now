@@ -21,6 +21,8 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.UUID
 
 class SessionRepository(context: Context) {
@@ -478,13 +480,48 @@ class SessionRepository(context: Context) {
 
     private fun readManifest(directory: File): VideoSession? {
         val manifest = manifestFile(directory)
-        if (!manifest.exists()) {
-            return null
+        if (manifest.exists()) {
+            return runCatching {
+                videoSessionFromJson(JSONObject(manifest.readText(StandardCharsets.UTF_8)))
+                    .takeIf { it.id == directory.name }
+            }.getOrNull()
         }
+
+        // Older builds could remove the primary before installing this completed staging file.
+        // Never prefer staging data over an existing primary or adopt another session's data.
+        val temporary = File(directory, "$MANIFEST_FILE_NAME.tmp")
         return runCatching {
-            videoSessionFromJson(JSONObject(manifest.readText(StandardCharsets.UTF_8)))
+            val json = JSONObject(temporary.readText(StandardCharsets.UTF_8))
+            require(json.getInt("schemaVersion") == 1)
+            json.getJSONArray("segments")
+            json.getJSONArray("markers")
+            json.getLong("totalDurationMs")
+            val recovered = videoSessionFromJson(json)
+            require(recovered.id == directory.name)
+            require(json.getString("status") == recovered.status.name)
+            require(recovered.segments.all { segment ->
+                segment.durationMs > 0 && isLocalSessionFileName(segment.fileName) &&
+                    File(directory, segment.fileName).let { it.isFile && it.length() > 0L }
+            })
+            require(recovered.totalDurationMs == recovered.segments.sumOf { it.durationMs })
+            val segmentIds = recovered.segments.map { it.id }.toSet()
+            require(recovered.markers.all { it.segmentId in segmentIds })
+            recovered.outputFileName?.let { output ->
+                require(isLocalSessionFileName(output))
+                // Existing interrupted-export cleanup must never delete a committed source clip.
+                require(recovered.status != SessionStatus.EXPORTING || recovered.segments.none { it.fileName == output })
+            }
+            require(recovered.status != SessionStatus.READY ||
+                recovered.outputFileName?.let { File(directory, it).isFile } == true)
+            replaceManifest(temporary, manifest)
+            recovered
         }.getOrNull()
     }
+
+    private fun isLocalSessionFileName(name: String): Boolean =
+        name.isNotEmpty() && name != "." && name != ".." &&
+            name.none { it == '/' || it == '\\' || it == ':' } &&
+            name != MANIFEST_FILE_NAME && name != "$MANIFEST_FILE_NAME.tmp"
 
     private fun writeManifest(session: VideoSession) {
         val directory = sessionDirectory(session.id)
@@ -496,12 +533,12 @@ class SessionRepository(context: Context) {
             stream.write(bytes)
             stream.fd.sync()
         }
-        if (target.exists()) {
-            target.delete()
-        }
-        check(temporary.renameTo(target)) {
-            "Could not atomically save the session manifest"
-        }
+        replaceManifest(temporary, target)
+    }
+
+    private fun replaceManifest(temporary: File, target: File) {
+        // No delete/copy fallback: unsupported atomic replacement must retain the old data.
+        Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
     }
 
     @Synchronized
