@@ -499,6 +499,10 @@ class SessionRepository(context: Context) {
             val recovered = videoSessionFromJson(json)
             require(recovered.id == directory.name)
             require(json.getString("status") == recovered.status.name)
+            require(when (recovered.status) {
+                SessionStatus.DRAFT, SessionStatus.FAILED -> recovered.outputFileName == null
+                SessionStatus.READY, SessionStatus.EXPORTING -> recovered.outputFileName != null
+            })
             require(recovered.segments.all { segment ->
                 segment.durationMs > 0 && isLocalSessionFileName(segment.fileName) &&
                     File(directory, segment.fileName).let { it.isFile && it.length() > 0L }

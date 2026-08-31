@@ -249,6 +249,86 @@ class SessionManifestRecoveryTest {
         }
     }
 
+    @Test fun outputStateMatrixMatchesTheFourWriterStates() {
+        val mismatches = mutableListOf<String>()
+        for (status in listOf("DRAFT", "FAILED", "READY", "EXPORTING")) {
+            for (reference in listOf("OMITTED", "NULL", "NAMED", "UNSAFE")) {
+                val fixture = seedFixture()
+                val temporary = leaveLegacyInterruptedSave(fixture)
+                val json = JSONObject(temporary.readText(Charsets.UTF_8))
+                json.put("status", status)
+                when (reference) {
+                    "OMITTED" -> json.remove("outputFileName")
+                    "NULL" -> json.put("outputFileName", JSONObject.NULL)
+                    "UNSAFE" -> json.put("outputFileName", "../other-session/output.mp4")
+                    else -> {
+                        val output = File(fixture.manifest.parentFile, "matrix-output.mp4")
+                        output.writeText("synthetic output bytes", Charsets.UTF_8)
+                        json.put("outputFileName", output.name)
+                    }
+                }
+                temporary.writeText(json.toString(), Charsets.UTF_8)
+                val recovered = SessionRepository(fixture.context).readSession(fixture.saved.id)
+                val expected = if (status == "DRAFT" || status == "FAILED") {
+                    reference == "OMITTED" || reference == "NULL"
+                } else {
+                    reference == "NAMED"
+                }
+                if ((recovered != null) != expected) {
+                    mismatches += "$status/$reference: expected accepted=$expected, actual=${recovered?.status}"
+                }
+                assertEquals(SYNTHETIC_CLIP, fixture.clip.readText(Charsets.UTF_8))
+            }
+        }
+        assertEquals("Only writer-consistent state/output pairs may recover", emptyList<String>(), mismatches)
+    }
+
+    @Test fun outputStateWriterTransitionsUseNullOnlyForDraftAndFailed() {
+        val fixture = seedFixture()
+        assertEquals("DRAFT", fixture.saved.status.name)
+        assertNull(fixture.saved.outputFileName)
+        val name = "writer-output.mp4"
+        val exporting = fixture.repository.markExporting(fixture.saved.id, name)
+        assertEquals("EXPORTING", exporting.status.name)
+        assertEquals(name, exporting.outputFileName)
+        val failed = fixture.repository.markExportFailed(fixture.saved.id, "synthetic export failure")
+        assertEquals("FAILED", failed.status.name)
+        assertNull(failed.outputFileName)
+        val resumed = fixture.repository.markDraftResumable(fixture.saved.id)
+        assertEquals("DRAFT", resumed.status.name)
+        assertNull(resumed.outputFileName)
+        fixture.repository.markExporting(fixture.saved.id, name)
+        fixture.repository.outputFile(fixture.saved.id, name).writeText("synthetic completed output", Charsets.UTF_8)
+        val ready = fixture.repository.markReady(fixture.saved.id)
+        assertEquals("READY", ready.status.name)
+        assertEquals(name, ready.outputFileName)
+        assertEquals(SYNTHETIC_CLIP, fixture.clip.readText(Charsets.UTF_8))
+    }
+
+    @Test fun outputStateExportingDoesNotRequireCompletedBytesButReadyDoes() {
+        val mismatches = mutableListOf<String>()
+        for (status in listOf("READY", "EXPORTING")) {
+            for (bytes in listOf("MISSING", "EMPTY", "NONEMPTY")) {
+                val fixture = seedFixture()
+                val temporary = leaveLegacyInterruptedSave(fixture)
+                val output = File(fixture.manifest.parentFile, "state-bytes-output.mp4")
+                when (bytes) {
+                    "EMPTY" -> output.writeBytes(byteArrayOf())
+                    "NONEMPTY" -> output.writeText("synthetic completed output", Charsets.UTF_8)
+                }
+                val json = JSONObject(temporary.readText(Charsets.UTF_8))
+                json.put("status", status)
+                json.put("outputFileName", output.name)
+                temporary.writeText(json.toString(), Charsets.UTF_8)
+                val recovered = SessionRepository(fixture.context).readSession(fixture.saved.id)
+                val expected = status == "EXPORTING" || bytes == "NONEMPTY"
+                if ((recovered != null) != expected) mismatches += "$status/$bytes"
+                assertEquals(SYNTHETIC_CLIP, fixture.clip.readText(Charsets.UTF_8))
+            }
+        }
+        assertEquals(emptyList<String>(), mismatches)
+    }
+
     private fun assertNotPromoted(fixture: Fixture) {
         val reopened = SessionRepository(fixture.context)
         assertNull(reopened.readSession(fixture.saved.id))
